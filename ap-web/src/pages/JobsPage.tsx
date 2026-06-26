@@ -4,8 +4,8 @@
  * Lists the jobs the user has created — each job is a named, saved flow chart
  * (see {@link jobsStore}). "Create flow" makes a new empty job and opens it in
  * the flow builder (`/jobs/flow/:jobId`); clicking a job reopens its chart.
- * Jobs can be renamed or deleted inline. Persistence is browser localStorage;
- * there is no server involvement.
+ * Jobs can be renamed or deleted inline. Persistence is the `/v1/jobs` API
+ * (see {@link jobsStore}); a job's last-run status comes from its real runs.
  */
 
 import { useState } from "react";
@@ -51,8 +51,8 @@ export function JobsPage() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
-  const onCreate = () => {
-    const job = createJob("Untitled flow");
+  const onCreate = async () => {
+    const job = await createJob("Untitled flow");
     navigate(`/jobs/flow/${job.id}`);
   };
 
@@ -62,7 +62,7 @@ export function JobsPage() {
   };
   const commitRename = (id: string) => {
     const v = renameValue.trim();
-    if (v) updateJob(id, { name: v });
+    if (v) void updateJob(id, { name: v });
     setRenamingId(null);
   };
 
@@ -138,7 +138,7 @@ export function JobsPage() {
                     size="icon-sm"
                     aria-label="Delete job"
                     onClick={() => {
-                      if (window.confirm(`Delete “${job.name}”?`)) deleteJob(job.id);
+                      if (window.confirm(`Delete “${job.name}”?`)) void deleteJob(job.id);
                     }}
                   >
                     <Trash2Icon className="size-3.5" />

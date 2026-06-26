@@ -17,7 +17,7 @@
  * each step has a delete (which removes it and everything below).
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowLeftIcon,
   CheckCircle2Icon,
@@ -48,7 +48,8 @@ import {
   type FlowStep,
   type Slot,
 } from "@/lib/flowTree";
-import { getJob, runJob, updateJob, useJob, type Run } from "@/lib/jobsStore";
+import { runJob, updateJob, useJob, type Run } from "@/lib/jobsStore";
+import { useAvailableAgents } from "@/hooks/useAvailableAgents";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -234,24 +235,38 @@ type OutputTab = "narrative" | "outline" | "mermaid" | "runs";
 export function FlowchartPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
-  // Reactive read so the Runs tab updates live as runs progress.
-  const job = useJob(jobId);
-  const seedJob = jobId ? getJob(jobId) : undefined;
+  // Reactive read so the Runs tab updates live as runs progress. The job loads
+  // from the API after mount, so `loading` distinguishes "fetching" from "404".
+  const { job, loading: jobLoading } = useJob(jobId);
 
-  // The builder's working copy of the step tree. Seeded once from the job;
-  // Save writes it back. Keyed by jobId so navigating between jobs re-seeds.
-  const [tree, setTree] = useState<FlowStep>(() => seedJob?.tree ?? newStep("start"));
-  const [seededFor, setSeededFor] = useState<string | undefined>(jobId);
-  if (jobId !== seededFor) {
-    // Job changed without unmount — re-seed synchronously before paint.
-    setTree(seedJob?.tree ?? newStep("start"));
-    setSeededFor(jobId);
-  }
+  // The builder's working copy of the step tree. Seeded from the job once it
+  // resolves; Save writes it back. Re-seeds when the job (id or loaded tree)
+  // changes.
+  const [tree, setTree] = useState<FlowStep>(() => job?.tree ?? newStep("start"));
+  const [seededFor, setSeededFor] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    // Seed once per job, when its tree first arrives.
+    if (job && job.id !== seededFor) {
+      setTree(job.tree);
+      setSeededFor(job.id);
+    }
+  }, [job, seededFor]);
 
   const [tab, setTab] = useState<OutputTab>("narrative");
   const [copied, setCopied] = useState(false);
   const [saved, setSaved] = useState(false);
   const [running, setRunning] = useState(false);
+
+  // Agent picker: a job runs as the chosen agent (its narrative becomes that
+  // agent's first prompt). Persisted on the job.
+  const { data: agents } = useAvailableAgents();
+  const onPickAgent = useCallback(
+    (agentId: string) => {
+      if (!jobId) return;
+      void updateJob(jobId, { agentId: agentId || null });
+    },
+    [jobId],
+  );
 
   // Tree → flat graph → text. Pure & cheap, recompute on every edit.
   const result = useMemo(() => generateFlowText(treeToGraph(tree)), [tree]);
@@ -281,18 +296,26 @@ export function FlowchartPage() {
   // ---- job actions ----
   const onSave = useCallback(() => {
     if (!jobId) return;
-    updateJob(jobId, { tree });
+    void updateJob(jobId, { tree });
     setSaved(true);
     setTimeout(() => setSaved(false), 1200);
   }, [jobId, tree]);
 
-  const onRun = useCallback(() => {
+  const onRun = useCallback(async () => {
     if (!jobId || running) return;
-    updateJob(jobId, { tree });
-    setTab("runs");
     setRunning(true);
-    void runJob(jobId).finally(() => setRunning(false));
-  }, [jobId, tree, running]);
+    setTab("runs");
+    try {
+      // Persist the on-screen tree first so the run uses the current flow.
+      await updateJob(jobId, { tree });
+      const run = await runJob(jobId);
+      if (run?.sessionId) navigate(`/c/${run.sessionId}`);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : "Failed to run job");
+    } finally {
+      setRunning(false);
+    }
+  }, [jobId, tree, running, navigate]);
 
   const copyOutput = useCallback(() => {
     const text =
@@ -303,8 +326,9 @@ export function FlowchartPage() {
     });
   }, [tab, result]);
 
-  // Stale/cleared job → bounce back to the list.
-  if (jobId && !job) {
+  // Stale/deleted job → bounce back to the list. Wait for the API fetch to
+  // settle first so the loading window doesn't flash this.
+  if (jobId && !job && !jobLoading) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
         <p className="text-sm font-medium">This flow no longer exists.</p>
@@ -332,10 +356,30 @@ export function FlowchartPage() {
         <span className="min-w-0 flex-1 truncate text-sm font-medium">
           {job?.name ?? "Flow builder"}
         </span>
+        <select
+          aria-label="Run as agent"
+          data-testid="job-agent-select"
+          value={job?.agentId ?? ""}
+          onChange={(e) => onPickAgent(e.target.value)}
+          disabled={!jobId}
+          className="h-8 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <option value="">Pick an agent…</option>
+          {(agents ?? []).map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.display_name}
+            </option>
+          ))}
+        </select>
         <Button variant="outline" size="sm" onClick={onSave} disabled={!jobId}>
           <SaveIcon className="size-3.5" /> {saved ? "Saved!" : "Save"}
         </Button>
-        <Button size="sm" onClick={onRun} disabled={!jobId || running || !hasSteps}>
+        <Button
+          size="sm"
+          onClick={onRun}
+          disabled={!jobId || running || !hasSteps || !job?.agentId}
+          data-testid="job-run-button"
+        >
           {running ? (
             <Loader2Icon className="size-3.5 animate-spin" />
           ) : (
