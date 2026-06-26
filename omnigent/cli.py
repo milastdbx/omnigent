@@ -2980,6 +2980,7 @@ def server(
         SqlAlchemyConversationStore,
     )
     from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
+    from omnigent.stores.entity_store.sqlalchemy_store import SqlAlchemyEntityStore
     from omnigent.stores.job_store.sqlalchemy_store import SqlAlchemyJobStore
     from omnigent.stores.policy_store.sqlalchemy_store import SqlAlchemyPolicyStore
 
@@ -3009,6 +3010,7 @@ def server(
     policy_store = SqlAlchemyPolicyStore(db_uri)
     permission_store = SqlAlchemyPermissionStore(db_uri)
     job_store = SqlAlchemyJobStore(db_uri)
+    entity_store = SqlAlchemyEntityStore(db_uri)
     artifact_store = _create_artifact_store(art_loc)
 
     # Initialize the runtime with store references so workflow code
@@ -3158,6 +3160,7 @@ def server(
         auth_provider=auth_provider,
         host_store=host_store,
         job_store=job_store,
+        entity_store=entity_store,
         account_store=account_store,
         policy_modules=cfg.get("policy_modules"),
         admins=config_str_list(cfg.get("admins")),

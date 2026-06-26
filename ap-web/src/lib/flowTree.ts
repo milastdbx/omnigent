@@ -21,6 +21,21 @@ export interface FlowStep {
   id: string;
   type: FlowNodeType;
   label: string;
+  /**
+   * For steps created from a predefined catalog action (see `actionCatalog`):
+   * the action id (e.g. "jira.fetch_ticket") and its group name (e.g. "Jira").
+   * Such steps are `process` nodes whose label/source comes from the catalog;
+   * generic steps leave these undefined.
+   */
+  actionId?: string;
+  actionGroup?: string;
+  /**
+   * For action/entity-backed steps: the full instruction text the entity (or
+   * wired-in job) contributes when this flow is actually run. Kept separate
+   * from `label` so the narrative shows one concise line per step (the label)
+   * rather than inlining a whole multi-line instruction/sub-narrative.
+   */
+  instruction?: string;
   /** Successor for non-decision steps (null = open slot, shows a "+"). */
   next: FlowStep | null;
   /** Decision true-branch head + its label. */
@@ -35,7 +50,7 @@ export interface FlowStep {
 export type Slot = "next" | "yes" | "no";
 
 /** Types offerable when adding a step (Start only ever exists as the root). */
-export const ADDABLE_TYPES: FlowNodeType[] = ["process", "decision", "io", "end"];
+export const ADDABLE_TYPES: FlowNodeType[] = ["process", "decision", "end"];
 
 export function defaultLabel(type: FlowNodeType): string {
   switch (type) {
@@ -74,6 +89,42 @@ export function newTree(): FlowStep {
   return newStep("start");
 }
 
+/**
+ * A process step backed by a predefined catalog action. Carries the action and
+ * group ids so the box can show its provenance and a real run could dispatch it.
+ */
+export function newActionStep(
+  actionId: string,
+  label: string,
+  group: string,
+  instruction?: string,
+): FlowStep {
+  return { ...newStep("process", label), actionId, actionGroup: group, instruction };
+}
+
+/**
+ * Repair action-backed steps from a catalog lookup (the source of truth).
+ *
+ * Earlier builds stored the full instruction text *as the step label*, which
+ * made the narrative inline whole instructions/sub-narratives. This rewrites
+ * any step that has an `actionId` the lookup recognizes so its `label` is the
+ * concise title and `instruction` holds the full text — fixing legacy steps on
+ * load. Idempotent: a correctly-shaped step is rewritten to the same values.
+ * Steps whose `actionId` is unknown (entity/job since deleted) are left as-is.
+ */
+export function repairActionSteps(
+  root: FlowStep,
+  lookup: (actionId: string) => { label: string; instruction: string } | undefined,
+): FlowStep {
+  return mapTree(root, (s) => {
+    if (!s.actionId) return s;
+    const def = lookup(s.actionId);
+    if (!def) return s;
+    if (s.label === def.label && s.instruction === def.instruction) return s;
+    return { ...s, label: def.label, instruction: def.instruction };
+  });
+}
+
 /** Map every step in the tree, returning a new tree (pure). */
 function mapTree(step: FlowStep, fn: (s: FlowStep) => FlowStep): FlowStep {
   const mapped = fn(step);
@@ -90,6 +141,22 @@ export function attach(root: FlowStep, parentId: string, slot: Slot, type: FlowN
   return mapTree(root, (s) => {
     if (s.id !== parentId || s[slot]) return s;
     return { ...s, [slot]: newStep(type) };
+  });
+}
+
+/** Attach a predefined catalog action to `parentId`'s `slot`. No-op if taken. */
+export function attachAction(
+  root: FlowStep,
+  parentId: string,
+  slot: Slot,
+  actionId: string,
+  label: string,
+  group: string,
+  instruction?: string,
+): FlowStep {
+  return mapTree(root, (s) => {
+    if (s.id !== parentId || s[slot]) return s;
+    return { ...s, [slot]: newActionStep(actionId, label, group, instruction) };
   });
 }
 
@@ -110,16 +177,28 @@ export function setBranchLabel(
 }
 
 /**
- * Remove a step and everything below it. Returns the new tree, or `null` if the
- * deleted step was the root (caller decides what to seed in its place).
+ * Remove a step, returning the new tree (or `null` if the deleted step was the
+ * root — caller decides what to seed in its place).
+ *
+ * Splicing rule: a removed step in a *linear* slot (`next`) is replaced by its
+ * own `next`, so the chain stays connected (delete a middle box → the boxes
+ * below it move up). A removed step that is a *branch head* (`yes`/`no`) is
+ * replaced by its `next` too; its branches, if any, are dropped. A removed
+ * step whose own subtree can't be linearly re-linked (it's a decision with two
+ * branches) takes its subtree with it — there's no single chain to promote.
  */
 export function deleteStep(root: FlowStep, id: string): FlowStep | null {
   if (root.id === id) return null;
+  // What replaces a removed step in a single-successor slot: its `next` if the
+  // removed step is linear (or a decision collapses to just its next-less self,
+  // i.e. null). Decisions have no `next`, so they collapse the whole subtree.
+  const promote = (child: FlowStep): FlowStep | null =>
+    child.type === "decision" ? null : child.next;
   return mapTree(root, (s) => ({
     ...s,
-    next: s.next?.id === id ? null : s.next,
-    yes: s.yes?.id === id ? null : s.yes,
-    no: s.no?.id === id ? null : s.no,
+    next: s.next?.id === id ? promote(s.next) : s.next,
+    yes: s.yes?.id === id ? promote(s.yes) : s.yes,
+    no: s.no?.id === id ? promote(s.no) : s.no,
   }));
 }
 

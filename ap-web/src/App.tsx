@@ -27,6 +27,9 @@ const ApprovePage = lazy(() =>
 );
 const InboxPage = lazy(() => import("@/pages/InboxPage").then((m) => ({ default: m.InboxPage })));
 const JobsPage = lazy(() => import("@/pages/JobsPage").then((m) => ({ default: m.JobsPage })));
+const EntitiesPage = lazy(() =>
+  import("@/pages/EntitiesPage").then((m) => ({ default: m.EntitiesPage })),
+);
 const FlowchartPage = lazy(() =>
   import("@/pages/FlowchartPage").then((m) => ({ default: m.FlowchartPage })),
 );
@@ -129,6 +132,7 @@ function App({ basename }: AppProps = {}) {
           <Route path={`${prefix}/inbox`} element={<InboxPage />} />
           <Route path={`${prefix}/jobs`} element={<JobsPage />} />
           <Route path={`${prefix}/jobs/flow/:jobId`} element={<FlowchartPage />} />
+          <Route path={`${prefix}/entities`} element={<EntitiesPage />} />
           {/* Settings renders into the chat outlet so the conversations
               sidebar stays put — entering settings only swaps the card's
               content (the section nav) and the main area. The active section

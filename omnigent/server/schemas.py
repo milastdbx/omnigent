@@ -3788,6 +3788,57 @@ HarnessStreamEvent = ServerStreamEvent | InjectionConsumedEvent | PolicyEvaluati
 # ── Jobs / Workflows ──────────────────────────────────────
 
 
+class EntityCreateRequest(BaseModel):
+    """
+    Request body for ``POST /v1/entities``.
+
+    An entity is a reusable named instruction wired into flows as a step.
+
+    :param title: Human-readable title shown on the flow step.
+    :param instruction: Instruction text folded into a flow when used.
+    """
+
+    title: str = Field(min_length=1, max_length=256)
+    instruction: str = ""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EntityUpdateRequest(BaseModel):
+    """
+    Request body for ``PATCH /v1/entities/{id}``. All fields optional; only
+    the provided ones are applied.
+
+    :param title: New entity title.
+    :param instruction: New instruction text.
+    """
+
+    title: str | None = Field(default=None, min_length=1, max_length=256)
+    instruction: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EntityResponse(BaseModel):
+    """
+    An entity as returned by the entities endpoints.
+
+    :param id: Unique entity identifier, e.g. ``"ent_abc123"``.
+    :param object: Always ``"entity"``.
+    :param title: Human-readable title.
+    :param instruction: Instruction text folded into a flow when used.
+    :param created_at: Unix epoch seconds of creation.
+    :param updated_at: Unix epoch seconds of the last update.
+    """
+
+    id: str
+    object: str = "entity"
+    title: str
+    instruction: str
+    created_at: int
+    updated_at: int
+
+
 class JobCreateRequest(BaseModel):
     """
     Request body for ``POST /v1/jobs``.

@@ -23,6 +23,7 @@ from omnigent.entities.conversation import (
     parse_item_data,
     synthesize_conversation_title,
 )
+from omnigent.entities.entity import Entity
 from omnigent.entities.file import StoredFile
 from omnigent.entities.job import (
     RUN_STATUS_FAILED,
@@ -56,6 +57,7 @@ __all__ = [
     "CompactionData",
     "Conversation",
     "ConversationItem",
+    "Entity",
     "ErrorData",
     "FunctionCallData",
     "FunctionCallOutputData",
