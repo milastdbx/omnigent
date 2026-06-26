@@ -53,6 +53,7 @@ from omnigent.server.performance_metrics import (
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
 from omnigent.server.routes.default_policies import create_default_policies_router
+from omnigent.server.routes.entities import create_entities_router
 from omnigent.server.routes.jobs import create_jobs_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
@@ -74,6 +75,7 @@ from omnigent.stores import (
 from omnigent.stores.comment_store import CommentStore
 from omnigent.stores.conversation_store import SessionConnectivity
 from omnigent.stores.host_store import HostStore
+from omnigent.stores.entity_store import EntityStore
 from omnigent.stores.job_store import JobStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
@@ -979,6 +981,7 @@ def create_app(
     auth_provider: AuthProvider | None = None,
     host_store: HostStore | None = None,
     job_store: JobStore | None = None,
+    entity_store: EntityStore | None = None,
     account_store: Any | None = None,  # SqlAlchemyAccountStore — accounts mode only
     extra_routers: list[tuple[Any, str, list[str]]] | None = None,
     policy_modules: list[str] | None = None,
@@ -1813,6 +1816,17 @@ def create_app(
             ),
             prefix="/v1",
             tags=["jobs"],
+        )
+    if entity_store is not None:
+        # Entities: reusable named instructions wired into flows (jobs) as steps.
+        app.include_router(
+            create_entities_router(
+                entity_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            ),
+            prefix="/v1",
+            tags=["entities"],
         )
     # Read-only built-in agent discovery (designs/BUILTIN_AGENTS.md).
     # Successor to the removed GET /api/agents list; lists only

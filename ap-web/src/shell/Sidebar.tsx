@@ -18,6 +18,7 @@ import {
   GitBranchIcon,
   InboxIcon,
   WorkflowIcon,
+  BlocksIcon,
   ListChecksIcon,
   Loader2Icon,
   MoreHorizontalIcon,
@@ -125,6 +126,7 @@ function useActiveNavItem(): {
   isNewChatPage: boolean;
   isInboxPage: boolean;
   isJobsPage: boolean;
+  isEntitiesPage: boolean;
 } {
   const { conversationId: activeConversationId } = useParams<{ conversationId: string }>();
   const segments = useLocation().pathname.split("/").filter(Boolean);
@@ -132,10 +134,12 @@ function useActiveNavItem(): {
   // Jobs covers both the list (`/jobs`) and the flow builder
   // (`/jobs/flow/:id`), so match the segment rather than only the last one.
   const isJobsPage = segments.includes("jobs");
-  // Exclude inbox/jobs: they also have no `:conversationId`, so they would
-  // otherwise light up the "New session" button.
-  const isNewChatPage = activeConversationId == null && !isInboxPage && !isJobsPage;
-  return { isNewChatPage, isInboxPage, isJobsPage };
+  const isEntitiesPage = segments.includes("entities");
+  // Exclude inbox/jobs/entities: they also have no `:conversationId`, so they
+  // would otherwise light up the "New session" button.
+  const isNewChatPage =
+    activeConversationId == null && !isInboxPage && !isJobsPage && !isEntitiesPage;
+  return { isNewChatPage, isInboxPage, isJobsPage, isEntitiesPage };
 }
 
 /**
@@ -242,7 +246,7 @@ export function Sidebar({ open, onClose, dragProgress = null }: SidebarProps) {
   }
 
   // Which top-level nav button to highlight for the current route.
-  const { isNewChatPage, isInboxPage, isJobsPage } = useActiveNavItem();
+  const { isNewChatPage, isInboxPage, isJobsPage, isEntitiesPage } = useActiveNavItem();
 
   // On /settings the card keeps its chrome but swaps the conversation list
   // for the settings section nav (see settingsNav.tsx) — entering settings
@@ -403,6 +407,23 @@ export function Sidebar({ open, onClose, dragProgress = null }: SidebarProps) {
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="bottom">Jobs</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    asChild
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Entities"
+                    className={cn("relative rounded-full", isEntitiesPage && "bg-muted")}
+                    data-testid="entities-button"
+                  >
+                    <Link to="/entities" onClick={onNavClick}>
+                      <BlocksIcon className="size-4" />
+                    </Link>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">Entities</TooltipContent>
               </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>

@@ -882,3 +882,35 @@ class SqlRun(Base):
         Index("ix_runs_session_id", "session_id"),
         Index("ix_runs_status", "status"),
     )
+
+
+class SqlEntity(Base):
+    """
+    SQLAlchemy model for the ``entities`` table.
+
+    An *entity* is a reusable named instruction authored in the web UI (e.g. the
+    Jira actions). It can be wired into a flow (job) as a step, where its
+    ``instruction`` text is folded into the flow's rendered narrative. The
+    backend stores it verbatim and never interprets the instruction.
+
+    :param id: Unique entity identifier, e.g. ``"ent_0f1a2b3c..."``.
+    :param created_at: Unix epoch seconds when the entity was created.
+    :param updated_at: Unix epoch seconds of the last update.
+    :param title: Human-readable title shown on the flow step.
+    :param instruction: Instruction text folded into a flow when used.
+    :param created_by: Owning user id, or ``None`` in single-user mode.
+    """
+
+    __tablename__ = "entities"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(256))
+    instruction: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    __table_args__ = (
+        Index("ix_entities_created_by_updated_at", "created_by", "updated_at"),
+        Index("ix_entities_updated_at", "updated_at"),
+    )

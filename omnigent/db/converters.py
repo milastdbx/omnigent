@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from omnigent.db.db_models import SqlAgent, SqlJob, SqlRun
-from omnigent.entities import Agent, Job, Run
+from omnigent.db.db_models import SqlAgent, SqlEntity, SqlJob, SqlRun
+from omnigent.entities import Agent, Entity, Job, Run
 
 
 def sql_agent_to_entity(row: SqlAgent) -> Agent:
@@ -62,5 +62,22 @@ def sql_run_to_entity(row: SqlRun) -> Run:
         started_at=row.started_at,
         completed_at=row.completed_at,
         error=row.error,
+        created_by=row.created_by,
+    )
+
+
+def sql_entity_to_entity(row: SqlEntity) -> Entity:
+    """
+    Convert a :class:`SqlEntity` ORM row to an :class:`Entity` entity.
+
+    :param row: The SQLAlchemy ORM row to convert.
+    :returns: An :class:`Entity` dataclass instance.
+    """
+    return Entity(
+        id=row.id,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        title=row.title,
+        instruction=row.instruction,
         created_by=row.created_by,
     )

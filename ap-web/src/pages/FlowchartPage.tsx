@@ -17,7 +17,7 @@
  * each step has a delete (which removes it and everything below).
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeftIcon,
   CheckCircle2Icon,
@@ -38,6 +38,8 @@ import type { FlowNodeType } from "@/lib/flowToText";
 import {
   ADDABLE_TYPES,
   attach,
+  attachAction,
+  repairActionSteps,
   countSteps,
   defaultLabel,
   deleteStep,
@@ -50,6 +52,7 @@ import {
 } from "@/lib/flowTree";
 import { runJob, updateJob, useJob, type Run } from "@/lib/jobsStore";
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
+import { useActionCatalog, type ActionDef, type ActionGroup } from "@/lib/actionCatalog";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -64,9 +67,20 @@ const KIND_META: Record<FlowNodeType, { tag: string; box: string; chip: string }
 };
 
 // ---------------------------------------------------------------------------
-// "+" add control — click reveals the addable box types, pick one to append.
+// "+" add control — click reveals the addable box types plus any predefined
+// action groups (from the catalog), pick one to append.
 // ---------------------------------------------------------------------------
-function AddStep({ onPick }: { onPick: (type: FlowNodeType) => void }) {
+function AddStep({
+  onPick,
+  onPickAction,
+  groups,
+  loadingGroups,
+}: {
+  onPick: (type: FlowNodeType) => void;
+  onPickAction: (action: ActionDef, group: ActionGroup) => void;
+  groups: ActionGroup[];
+  loadingGroups: boolean;
+}) {
   const [open, setOpen] = useState(false);
   if (!open) {
     return (
@@ -81,22 +95,55 @@ function AddStep({ onPick }: { onPick: (type: FlowNodeType) => void }) {
     );
   }
   return (
-    <div className="flex flex-wrap items-center justify-center gap-1 rounded-lg border border-border bg-card p-1.5 shadow-md">
-      {ADDABLE_TYPES.map((type) => (
-        <Button
-          key={type}
-          variant="ghost"
-          size="sm"
-          onClick={() => {
-            onPick(type);
-            setOpen(false);
-          }}
-        >
-          <span className={cn("mr-1.5 inline-block size-2.5 rounded-sm", KIND_META[type].chip)} />
-          {KIND_META[type].tag}
-        </Button>
-      ))}
-      <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
+    <div className="flex w-60 flex-col gap-1 rounded-lg border border-border bg-card p-1.5 shadow-md">
+      {/* Generic node types */}
+      <div className="flex flex-wrap gap-1">
+        {ADDABLE_TYPES.map((type) => (
+          <Button
+            key={type}
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              onPick(type);
+              setOpen(false);
+            }}
+          >
+            <span className={cn("mr-1.5 inline-block size-2.5 rounded-sm", KIND_META[type].chip)} />
+            {KIND_META[type].tag}
+          </Button>
+        ))}
+      </div>
+
+      {/* Predefined action groups (from the catalog DB) */}
+      {loadingGroups ? (
+        <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground">
+          <Loader2Icon className="size-3.5 animate-spin" /> Loading integrations…
+        </div>
+      ) : (
+        groups.map((group) => (
+          <div key={group.id} className="border-t border-border pt-1">
+            <div className="px-2 py-0.5 text-[10px] font-bold tracking-wide text-muted-foreground uppercase">
+              {group.name}
+            </div>
+            {group.actions.map((action) => (
+              <button
+                key={action.id}
+                type="button"
+                title={action.description}
+                onClick={() => {
+                  onPickAction(action, group);
+                  setOpen(false);
+                }}
+                className="w-full rounded-md px-2 py-1 text-left text-sm hover:bg-muted"
+              >
+                {action.label}
+              </button>
+            ))}
+          </div>
+        ))
+      )}
+
+      <Button variant="ghost" size="sm" className="mt-0.5" onClick={() => setOpen(false)}>
         Cancel
       </Button>
     </div>
@@ -111,41 +158,149 @@ interface StepViewProps {
   step: FlowStep;
   isRoot: boolean;
   onAdd: (parentId: string, slot: Slot, type: FlowNodeType) => void;
+  onAddAction: (parentId: string, slot: Slot, action: ActionDef, group: ActionGroup) => void;
   onRename: (id: string, label: string) => void;
   onRenameBranch: (id: string, branch: "yes" | "no", label: string) => void;
   onDelete: (id: string) => void;
+  groups: ActionGroup[];
+  loadingGroups: boolean;
 }
 
 function Connector() {
   return <div className="h-6 w-0.5 bg-muted-foreground/60" />;
 }
 
-function StepView({ step, isRoot, onAdd, onRename, onRenameBranch, onDelete }: StepViewProps) {
-  const meta = KIND_META[step.type];
-  return (
-    <div className="flex flex-col items-center">
-      {/* The box */}
-      <div
-        className={cn(
-          "group relative flex min-w-[160px] max-w-[260px] flex-col items-center rounded-md border-2 px-4 py-2.5 text-center shadow-sm",
-          meta.box,
-        )}
-        onDoubleClick={() => {
-          const v = window.prompt("Label:", step.label);
-          if (v !== null) onRename(step.id, v.trim() || defaultLabel(step.type));
+/**
+ * Click-to-edit text. Renders `value` as a span until clicked, then swaps to an
+ * autofocused input. Commits on Enter or blur, cancels (restores) on Escape.
+ * `onCommit` receives the trimmed text; an empty result is ignored by callers
+ * via their fallback. `stopPropagation` keeps clicks/keys from reaching the
+ * canvas (deselect, delete shortcuts, etc.).
+ */
+function InlineEdit({
+  value,
+  onCommit,
+  className,
+  inputClassName,
+}: {
+  value: string;
+  onCommit: (next: string) => void;
+  className?: string;
+  inputClassName?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const ref = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) {
+      ref.current?.focus();
+      ref.current?.select();
+    }
+  }, [editing]);
+
+  const start = () => {
+    setDraft(value);
+    setEditing(true);
+  };
+  const commit = () => {
+    setEditing(false);
+    const next = draft.trim();
+    if (next && next !== value) onCommit(next);
+  };
+
+  if (!editing) {
+    return (
+      <span
+        className={cn("cursor-text", className)}
+        title="Click to edit"
+        onClick={(e) => {
+          e.stopPropagation();
+          start();
         }}
       >
+        {value}
+      </span>
+    );
+  }
+  return (
+    <input
+      ref={ref}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") {
+          setDraft(value);
+          setEditing(false);
+        }
+      }}
+      className={cn(
+        "w-full rounded border border-primary bg-background px-1 text-center outline-none",
+        inputClassName,
+      )}
+    />
+  );
+}
+
+function StepView({
+  step,
+  isRoot,
+  onAdd,
+  onAddAction,
+  onRename,
+  onRenameBranch,
+  onDelete,
+  groups,
+  loadingGroups,
+}: StepViewProps) {
+  const meta = KIND_META[step.type];
+  // Shared props for every nested StepView so the catalog threads down.
+  const childProps = { onAdd, onAddAction, onRename, onRenameBranch, onDelete, groups, loadingGroups };
+  return (
+    <div className="flex flex-col items-center">
+      {/* The box. `relative z-10` lifts it above the branch-connector
+          pseudo-elements (which sit at the lane's top-0) so its label input and
+          delete button always receive clicks. */}
+      <div
+        className={cn(
+          "group relative z-10 flex min-w-[160px] max-w-[260px] flex-col items-center rounded-md border-2 px-4 py-2.5 text-center shadow-sm",
+          meta.box,
+        )}
+      >
         <span className="text-[9.5px] font-bold tracking-wide text-muted-foreground uppercase">
-          {meta.tag}
+          {/* Action steps show their integration group (e.g. "Jira"); generic
+              steps show their node-type tag. */}
+          {step.actionGroup ?? meta.tag}
         </span>
-        <span className="text-sm break-words">{step.label}</span>
-        {/* Delete (not on the Start root — a flow always has a Start). */}
+        {/* A wired-in job's label IS the job's name — it must mirror the source
+            job, so it's shown read-only (editing it here would desync the two).
+            Entity and generic steps stay inline-editable. */}
+        {step.actionId?.startsWith("job:") ? (
+          <span className="text-sm break-words">{step.label}</span>
+        ) : (
+          <InlineEdit
+            value={step.label}
+            onCommit={(next) => onRename(step.id, next || defaultLabel(step.type))}
+            className="text-sm break-words"
+            inputClassName="text-sm"
+          />
+        )}
+        {/* Delete (not on the Start root — a flow always has a Start). Shown on
+            hover/focus-within; z-20 keeps it clickable above everything. */}
         {!isRoot && (
           <button
             type="button"
             aria-label="Delete step"
-            onClick={() => onDelete(step.id)}
-            className="absolute -top-2 -right-2 hidden size-5 items-center justify-center rounded-full border border-border bg-background text-muted-foreground hover:text-red-500 group-hover:flex"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(step.id);
+            }}
+            className="absolute -top-2 -right-2 z-20 hidden size-5 items-center justify-center rounded-full border border-border bg-background text-muted-foreground hover:text-red-500 group-hover:flex group-focus-within:flex"
           >
             <Trash2Icon className="size-3" />
           </button>
@@ -153,52 +308,53 @@ function StepView({ step, isRoot, onAdd, onRename, onRenameBranch, onDelete }: S
       </div>
 
       {step.type === "decision" ? (
-        // Two branch lanes (Yes / No) joined by a fork:
-        //   trunk (down from the box) → horizontal bar → a stub into each lane.
-        // Lanes are equal-width (flex-1) with no gap, so their centers sit at
-        // 25% / 75% of the row — exactly where the fork's vertical stubs land,
-        // and the trunk meets the bar's midpoint at 50%. Spacing between lanes
-        // comes from per-lane padding so it doesn't shift those centers.
+        // Two branch lanes (Yes / No) joined by a fork, drawn with the classic
+        // CSS-tree connector technique:
+        //   • trunk = the <Connector/> straight down from the box.
+        //   • each lane sizes to ITS OWN content (no flex-1 / no grid-fr) so
+        //     dense or deeply-nested branches spread out instead of shrinking
+        //     and overlapping — the canvas then scrolls horizontally.
+        //   • connectors are pseudo-elements positioned at `left-1/2` of each
+        //     lane, so they track each lane's real center at any width:
+        //       before:* = the short vertical stub down into the lane;
+        //       after:*  = the horizontal bar across the lane's top, clipped to
+        //                  the inner half on the first/last lane so the bar runs
+        //                  exactly between the two lane centers.
         <>
           <Connector />
-          <div className="flex w-full">
-            <div className="flex-1">
-              <div className="ml-auto h-4 w-1/2 border-t-2 border-l-2 border-muted-foreground/60" />
-            </div>
-            <div className="flex-1">
-              <div className="mr-auto h-4 w-1/2 border-t-2 border-r-2 border-muted-foreground/60" />
-            </div>
-          </div>
           <div className="flex items-start">
             {(["yes", "no"] as const).map((branch) => {
               const child = step[branch];
               const label = branch === "yes" ? step.yesLabel : step.noLabel;
               return (
-                <div key={branch} className="flex flex-1 flex-col items-center px-6">
-                  <button
-                    type="button"
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      const v = window.prompt("Branch label:", label);
-                      if (v !== null) onRenameBranch(step.id, branch, v.trim() || (branch === "yes" ? "Yes" : "No"));
-                    }}
-                    className="rounded-full border border-border bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
-                    title="Double-click to rename branch"
-                  >
-                    {label}
-                  </button>
+                <div
+                  key={branch}
+                  className={cn(
+                    "relative flex flex-col items-center px-6 pt-4",
+                    "before:absolute before:top-0 before:left-1/2 before:h-4 before:w-0.5 before:bg-muted-foreground/60",
+                    "after:absolute after:top-0 after:right-0 after:left-0 after:h-0.5 after:bg-muted-foreground/60",
+                    branch === "yes" ? "after:left-1/2" : "after:right-1/2",
+                  )}
+                >
+                  <div className="relative z-10 rounded-full border border-border bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                    <InlineEdit
+                      value={label}
+                      onCommit={(next) =>
+                        onRenameBranch(step.id, branch, next || (branch === "yes" ? "Yes" : "No"))
+                      }
+                      inputClassName="text-[11px] w-16"
+                    />
+                  </div>
                   <Connector />
                   {child ? (
-                    <StepView
-                      step={child}
-                      isRoot={false}
-                      onAdd={onAdd}
-                      onRename={onRename}
-                      onRenameBranch={onRenameBranch}
-                      onDelete={onDelete}
-                    />
+                    <StepView step={child} isRoot={false} {...childProps} />
                   ) : (
-                    <AddStep onPick={(type) => onAdd(step.id, branch, type)} />
+                    <AddStep
+                      groups={groups}
+                      loadingGroups={loadingGroups}
+                      onPick={(type) => onAdd(step.id, branch, type)}
+                      onPickAction={(action, group) => onAddAction(step.id, branch, action, group)}
+                    />
                   )}
                 </div>
               );
@@ -210,16 +366,14 @@ function StepView({ step, isRoot, onAdd, onRename, onRenameBranch, onDelete }: S
         <>
           <Connector />
           {step.next ? (
-            <StepView
-              step={step.next}
-              isRoot={false}
-              onAdd={onAdd}
-              onRename={onRename}
-              onRenameBranch={onRenameBranch}
-              onDelete={onDelete}
-            />
+            <StepView step={step.next} isRoot={false} {...childProps} />
           ) : (
-            <AddStep onPick={(type) => onAdd(step.id, "next", type)} />
+            <AddStep
+              groups={groups}
+              loadingGroups={loadingGroups}
+              onPick={(type) => onAdd(step.id, "next", type)}
+              onPickAction={(action, group) => onAddAction(step.id, "next", action, group)}
+            />
           )}
         </>
       )}
@@ -239,18 +393,31 @@ export function FlowchartPage() {
   // from the API after mount, so `loading` distinguishes "fetching" from "404".
   const { job, loading: jobLoading } = useJob(jobId);
 
+  // Pickable groups: saved entities (Jira, …) + other jobs wired in as steps.
+  // Exclude this job so a flow can't be wired into itself. Local stores → sync.
+  const { groups, loading: loadingGroups } = useActionCatalog(jobId);
+
+  // Lookup from action id → {label, instruction}, the source of truth for
+  // repairing action-backed steps (see seeding below).
+  const actionLookup = useMemo(() => {
+    const map = new Map<string, { label: string; instruction: string }>();
+    for (const g of groups)
+      for (const a of g.actions) map.set(a.id, { label: a.label, instruction: a.instruction });
+    return (id: string) => map.get(id);
+  }, [groups]);
+
   // The builder's working copy of the step tree. Seeded from the job once it
   // resolves; Save writes it back. Re-seeds when the job (id or loaded tree)
-  // changes.
+  // changes. On seed we also repair legacy action steps (older builds stored
+  // the full instruction as the label, which garbled the narrative).
   const [tree, setTree] = useState<FlowStep>(() => job?.tree ?? newStep("start"));
   const [seededFor, setSeededFor] = useState<string | undefined>(undefined);
   useEffect(() => {
-    // Seed once per job, when its tree first arrives.
     if (job && job.id !== seededFor) {
-      setTree(job.tree);
+      setTree(repairActionSteps(job.tree, actionLookup));
       setSeededFor(job.id);
     }
-  }, [job, seededFor]);
+  }, [job, seededFor, actionLookup]);
 
   const [tab, setTab] = useState<OutputTab>("narrative");
   const [copied, setCopied] = useState(false);
@@ -277,6 +444,15 @@ export function FlowchartPage() {
   const onAdd = useCallback(
     (parentId: string, slot: Slot, type: FlowNodeType) =>
       setTree((t) => attach(t, parentId, slot, type)),
+    [],
+  );
+  const onAddAction = useCallback(
+    (parentId: string, slot: Slot, action: ActionDef, group: ActionGroup) =>
+      // The step's *label* is the concise title (one clean narrative line); the
+      // full instruction is stored separately for when the flow actually runs.
+      setTree((t) =>
+        attachAction(t, parentId, slot, action.id, action.label, group.name, action.instruction),
+      ),
     [],
   );
   const onRename = useCallback(
@@ -390,16 +566,22 @@ export function FlowchartPage() {
       </div>
 
       <div className="flex min-h-0 flex-1">
-        {/* Stepper canvas */}
+        {/* Stepper canvas. `overflow-auto` scrolls both axes; the inner track
+            is `w-max` (sized to the widest row) with `mx-auto`, so the tree is
+            centered when it fits and scrolls — without clipping the left edge —
+            once dense branches make it wider than the viewport. */}
         <div className="min-w-0 flex-1 overflow-auto bg-[radial-gradient(circle,var(--border)_1px,transparent_1px)] [background-size:22px_22px]">
-          <div className="flex min-h-full justify-center p-10">
+          <div className="mx-auto flex min-h-full w-max flex-col items-center p-10">
             <StepView
               step={tree}
               isRoot
               onAdd={onAdd}
+              onAddAction={onAddAction}
               onRename={onRename}
               onRenameBranch={onRenameBranch}
               onDelete={onDelete}
+              groups={groups}
+              loadingGroups={loadingGroups}
             />
           </div>
         </div>
