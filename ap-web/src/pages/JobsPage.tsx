@@ -9,12 +9,41 @@
  */
 
 import { useState } from "react";
-import { PencilIcon, PlusIcon, Trash2Icon, WorkflowIcon } from "lucide-react";
+import {
+  CheckCircle2Icon,
+  Loader2Icon,
+  PencilIcon,
+  PlusIcon,
+  Trash2Icon,
+  WorkflowIcon,
+  XCircleIcon,
+} from "lucide-react";
 import { PageScroll } from "@/components/PageScroll";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { relativeTime } from "@/lib/relativeTime";
 import { Link, useNavigate } from "@/lib/routing";
-import { createJob, deleteJob, updateJob, useJobs } from "@/lib/jobsStore";
+import { countSteps } from "@/lib/flowTree";
+import { createJob, deleteJob, latestRun, updateJob, useJobs, type Run } from "@/lib/jobsStore";
+
+/** Compact last-run status pill for a job row. */
+function RunBadge({ run }: { run: Run | undefined }) {
+  if (!run) return <span className="text-xs text-muted-foreground">never run</span>;
+  if (run.status === "running") {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+        <Loader2Icon className="size-3.5 animate-spin" /> running…
+      </span>
+    );
+  }
+  const ok = run.status === "succeeded";
+  return (
+    <span className={cn("inline-flex items-center gap-1 text-xs", ok ? "text-emerald-500" : "text-red-500")}>
+      {ok ? <CheckCircle2Icon className="size-3.5" /> : <XCircleIcon className="size-3.5" />}
+      {ok ? "ran" : "failed"} {relativeTime(run.finishedAt ?? run.startedAt)}
+    </span>
+  );
+}
 
 export function JobsPage() {
   const jobs = useJobs();
@@ -60,7 +89,7 @@ export function JobsPage() {
       ) : (
         <div className="flex flex-col gap-2">
           {jobs.map((job) => {
-            const nodeCount = job.graph.nodes?.length ?? 0;
+            const nodeCount = countSteps(job.tree);
             const isRenaming = renamingId === job.id;
             return (
               <div
@@ -90,9 +119,9 @@ export function JobsPage() {
                       {job.name}
                     </Link>
                   )}
-                  <span className="text-xs text-muted-foreground">
-                    {nodeCount === 1 ? "1 node" : `${nodeCount} nodes`} · updated{" "}
-                    {relativeTime(job.updatedAt)}
+                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    {nodeCount === 1 ? "1 step" : `${nodeCount} steps`} · updated{" "}
+                    {relativeTime(job.updatedAt)} ·<RunBadge run={latestRun(job)} />
                   </span>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
