@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 
 from fastapi import APIRouter, Request
@@ -34,15 +35,27 @@ from omnigent.entities import (
     Run,
 )
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.harness_aliases import canonicalize_harness
+from omnigent.native_coding_agents import (
+    CLAUDE_NATIVE_CODING_AGENT,
+    CODEX_NATIVE_CODING_AGENT,
+)
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runtime.agent_cache import AgentCache
+from omnigent.runtime.policies.approval import AUTO_APPROVE_LABEL
 from omnigent.server.auth import LEVEL_OWNER, AuthProvider
 from omnigent.server.routes._auth_helpers import attribution_user, require_user
+from omnigent.server.routes.hosts import _proxy_list_dir
 from omnigent.server.routes.sessions import (
     SessionLiveness,
     _announce_session_added,
     _create_session_from_existing_agent,
+    _dispatch_session_event_to_runner,
+    _ensure_runner_relay_ready,
+    _get_runner_client,
+    _launch_runner_on_host,
     _session_status_from_cache,
+    _wait_for_runner_client,
 )
 from omnigent.server.schemas import (
     JobCreateRequest,
@@ -58,6 +71,8 @@ from omnigent.stores.conversation_store import ConversationStore
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.job_store import JobStore
 from omnigent.stores.permission_store import PermissionStore
+
+_logger = logging.getLogger(__name__)
 
 
 def _job_to_response(job: Job) -> JobResponse:
@@ -104,17 +119,46 @@ def _run_to_response(run: Run) -> RunResponse:
     )
 
 
-def _reconcile_run(run: Run, job_store: JobStore) -> Run:
+def _agent_has_responded(conversation_store: ConversationStore, session_id: str) -> bool:
+    """Whether the session's agent has produced any output yet.
+
+    The run seeds one ``user`` message (the narrative); an agent *turn* adds
+    assistant messages, reasoning, or tool calls. Detecting those distinguishes
+    "the turn ran" from "the session was just created and hasn't started" — the
+    session reads ``idle`` in both cases, so the live-status cache alone can't
+    tell them apart (especially for native harnesses that launch a terminal
+    asynchronously).
+
+    :param conversation_store: Store to read conversation items from.
+    :param session_id: The run's session id.
+    :returns: ``True`` once any agent-produced item exists.
+    """
+    page = conversation_store.list_items(session_id, limit=50, order="asc")
+    for item in page.data:
+        if item.type in ("function_call", "function_call_output", "reasoning", "native_tool"):
+            return True
+        # An assistant message means the agent replied (the seed is role=user).
+        if item.type == "message" and getattr(item.data, "role", None) == "assistant":
+            return True
+    return False
+
+
+def _reconcile_run(run: Run, job_store: JobStore, conversation_store: ConversationStore) -> Run:
     """Reconcile a still-``running`` run's status from its session.
 
     A run is recorded ``running`` at creation. Since a promptgen run is just an
-    agent session (no DAG), the terminal state is derived from the underlying
-    session's live status: a ``failed`` session fails the run; an ``idle``
-    session (loop finished or never started) marks it ``finished``. The
-    reconciled state is persisted so subsequent reads are cheap.
+    agent session (no DAG), the terminal state is derived from the session: a
+    ``failed`` session fails the run; an ``idle`` session marks the run
+    ``finished`` **only once the agent has actually produced output**. The
+    second condition matters because a freshly-launched session (notably a
+    native-Claude terminal, which starts asynchronously) reads ``idle`` before
+    its first turn — without the output check the run would flip to ``finished``
+    at t=0, before anything happened. The reconciled state is persisted so
+    subsequent reads are cheap.
 
     :param run: The run to reconcile.
     :param job_store: Store used to persist a terminal transition.
+    :param conversation_store: Store used to check for agent output.
     :returns: The (possibly updated) run.
     """
     if run.status != RUN_STATUS_RUNNING or run.session_id is None:
@@ -125,12 +169,110 @@ def _reconcile_run(run: Run, job_store: JobStore) -> Run:
             run.id, status=RUN_STATUS_FAILED, completed_at=now_epoch()
         )
         return updated or run
-    if session_status == "idle":
+    if session_status == "idle" and _agent_has_responded(conversation_store, run.session_id):
         updated = job_store.update_run_status(
             run.id, status=RUN_STATUS_FINISHED, completed_at=now_epoch()
         )
         return updated or run
+    # Still running, or idle-but-not-yet-started: leave as ``running``.
     return run
+
+
+def _pick_online_host(
+    request: Request,
+    *,
+    user_id: str | None,
+) -> str | None:
+    """Pick an online host to launch the job-run's runner on.
+
+    Runners are spawned on demand by a host (the web "New Chat" flow triggers
+    this by creating the session with a ``host_id``). We do the same: find an
+    online host the caller owns. Returns ``None`` when no host registry is wired
+    (in-process tests) or none is online — the caller then seeds the narrative
+    as history instead of dispatching.
+
+    :param request: The originating request, carrying ``app.state``.
+    :param user_id: Authenticated caller; ``None`` in single-user mode.
+    :returns: An online ``host_id``, or ``None``.
+    """
+    host_registry = getattr(request.app.state, "host_registry", None)
+    host_store = getattr(request.app.state, "host_store", None)
+    if host_registry is None:
+        return None
+    online = host_registry.online_host_ids()
+    if not online:
+        return None
+    # When auth + a host store are wired, prefer a host the caller owns.
+    if user_id is not None and host_store is not None:
+        owned = {h.host_id for h in host_store.list_hosts(user_id)}
+        for host_id in online:
+            if host_id in owned:
+                return host_id
+        return None
+    return online[0]
+
+
+async def _resolve_host_home(host_registry: object, host_conn: object) -> str | None:
+    """Resolve a host's absolute home directory.
+
+    A session bound to a host needs an absolute ``workspace``; the server can't
+    expand ``~`` (only the host knows its ``HOME``). Mirroring the web client's
+    ``deriveHomeDir``, we list the host's home (``~``) — whose entries carry
+    absolute paths — and take the parent of the first entry. Returns ``None``
+    when the listing fails or home is empty (then the run falls back to a seed).
+
+    :param host_registry: The server-side ``HostRegistry``.
+    :param host_conn: The live ``HostConnection`` for the host.
+    :returns: Absolute home path, e.g. ``"/Users/alice"``, or ``None``.
+    """
+    try:
+        result = await _proxy_list_dir(
+            host_registry=host_registry,
+            host_conn=host_conn,
+            path="~",
+            limit=1,
+            after=None,
+            before=None,
+        )
+    except Exception:  # noqa: BLE001 - any host/listing failure → seed fallback
+        return None
+    if result.get("status") != "ok":
+        return None
+    entries = result.get("entries") or []
+    if not entries:
+        return None
+    first_path = entries[0].get("path")
+    if not isinstance(first_path, str):
+        return None
+    slash = first_path.rfind("/")
+    # Parent of the first entry is home; "/x" → "/", deeper → the dir.
+    return first_path[:slash] if slash > 0 else "/"
+
+
+def _auto_approve_launch_args(harness: str | None) -> list[str] | None:
+    """Terminal launch args that auto-approve every action for a native harness.
+
+    A job run is unattended — there's no human to answer an ApprovalCard — so a
+    native harness that launches in its default (prompt-on-action) mode would
+    stall on the first Edit/Write/Bash. Force full bypass per harness, matching
+    the headless seam polly's native workers use:
+
+    - ``claude-native`` → ``--permission-mode bypassPermissions``
+    - ``codex-native``  → ``--dangerously-bypass-approvals-and-sandbox``
+
+    SDK harnesses (e.g. ``claude-sdk``) already default to ``bypassPermissions``
+    at spawn, so they need nothing here. Returns ``None`` for any non-native /
+    unknown harness (no terminal args set).
+
+    :param harness: The run agent's canonical harness, or ``None``.
+    :returns: A flat CLI-arg list, or ``None`` when nothing should be set.
+    """
+    canonical = canonicalize_harness(harness) or harness
+    if canonical == CLAUDE_NATIVE_CODING_AGENT.harness:
+        return ["--permission-mode", "bypassPermissions"]
+    if canonical == CODEX_NATIVE_CODING_AGENT.harness:
+        return ["--dangerously-bypass-approvals-and-sandbox"]
+    return None
 
 
 async def _execute_job_run(
@@ -149,13 +291,18 @@ async def _execute_job_run(
     artifact_store: ArtifactStore | None,
     default_run_agent_id: str | None,
 ) -> Run:
-    """Run a job: create a session from its narrative and record a run.
+    """Run a job: create a session, bind a runner, dispatch the narrative.
+
+    Mirrors the web "New Chat" flow so the run actually executes rather than
+    just seeding history: create the session (no initial items), auto-bind an
+    online runner, ready its relay, then dispatch the job's narrative as a user
+    message that triggers an agent turn. When no runner is available (e.g. no
+    host is registered), the narrative is persisted as a history-only seed so
+    the session opens with the prompt ready to send.
 
     This is the single execution path shared by the HTTP "Run now" handler and
-    any future scheduler — both build a session from the job's stored narrative
-    and bound agent, then persist a run row. A scheduler would load jobs with a
-    non-null ``schedule_config`` and call this with ``user_id`` set to the job
-    owner.
+    any future scheduler — a scheduler would load jobs with a non-null
+    ``schedule_config`` and call this with ``user_id`` set to the job owner.
 
     :param job: The job to run.
     :param request: The originating request (forwarded to session creation).
@@ -171,24 +318,54 @@ async def _execute_job_run(
             code=ErrorCode.INVALID_INPUT,
         )
 
+    # Pick an online host to launch the run's runner on. Runners are spawned on
+    # demand by a host, so without one the narrative can only be seeded (the
+    # session opens with the prompt ready to send manually).
+    host_id = _pick_online_host(request, user_id=user_id)
+
+    # A host-bound session needs an absolute workspace, and only the host knows
+    # its HOME — resolve it via a list_dir round-trip. If that fails, drop the
+    # host binding and fall back to seeding rather than failing the run.
+    workspace: str | None = None
+    host_registry = getattr(request.app.state, "host_registry", None)
+    if host_id is not None and host_registry is not None:
+        conn = host_registry.get(host_id)
+        if conn is not None:
+            workspace = await _resolve_host_home(host_registry, conn)
+        if workspace is None:
+            host_id = None
+
+    # Auto-approve mode: a job run is unattended, so no human can answer an
+    # approval prompt. Force full bypass for native harnesses (SDK harnesses
+    # already default to bypass). Harness = the job's override, else the spec's.
+    harness = job.harness_override
+    if harness is None and agent_cache is not None:
+        try:
+            agent = await asyncio.to_thread(agent_store.get, agent_id)
+            if agent is not None:
+                loaded = await asyncio.to_thread(
+                    agent_cache.load,
+                    agent.id,
+                    agent.bundle_location,
+                    expand_env=agent.session_id is None,
+                )
+                harness = loaded.spec.executor.harness_kind
+        except Exception:  # noqa: BLE001 - spec load is best-effort for approval mode
+            _logger.warning("job-run harness resolve failed for agent %s", agent_id, exc_info=True)
+            harness = None
+    terminal_launch_args = _auto_approve_launch_args(harness)
+
+    # Create the session WITHOUT initial items — we dispatch the narrative as a
+    # real event below so it executes.
     body = SessionCreateRequest(
         agent_id=agent_id,
         title=f"Run: {job.name}",
         harness_override=job.harness_override,
         model_override=job.model_override,
-        # No host is required: with host_type="external" and no bound runner,
-        # the narrative is persisted as a seed item and the session is created
-        # idle, ready to run when opened (or by a bound runner).
         host_type="external",
-        initial_items=[
-            SessionEventInput(
-                type="message",
-                data={
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": job.narrative}],
-                },
-            )
-        ],
+        host_id=host_id,
+        workspace=workspace,
+        terminal_launch_args=terminal_launch_args,
     )
     session = await _create_session_from_existing_agent(
         conversation_store,
@@ -209,6 +386,75 @@ async def _execute_job_run(
         await asyncio.to_thread(permission_store.ensure_user, user_id)
         await asyncio.to_thread(permission_store.grant, user_id, session.id, LEVEL_OWNER)
     _announce_session_added(user_id, session.id)
+
+    # Unattended auto-approve: a job run has no human to answer an ApprovalCard,
+    # so a policy ASK would hang the run until its timeout. Stamp the server-owned
+    # label that makes the policy engine grant ASK verdicts automatically. Set
+    # here (post-create) rather than via the create body, since that body rejects
+    # this policy-owned namespace. This covers Omnigent policy-engine ASKs; the
+    # harness's own permission prompts are handled by terminal_launch_args above.
+    await asyncio.to_thread(
+        conversation_store.set_labels, session.id, {AUTO_APPROVE_LABEL: "true"}
+    )
+
+    # Launch a runner on the host and wait for it to connect, then dispatch.
+    runner_id: str | None = None
+    if host_id is not None and host_registry is not None:
+        conn = host_registry.get(host_id)
+        conv = await asyncio.to_thread(conversation_store.get_conversation, session.id)
+        if conn is not None and conv is not None:
+            attempt = await _launch_runner_on_host(conv, conversation_store, host_registry, conn)
+            runner_id = attempt.runner_id
+            # Wait for the launched runner to connect before forwarding.
+            await _wait_for_runner_client(
+                session.id,
+                runner_router,
+                getattr(request.app.state, "tunnel_registry", None),
+                runner_id=runner_id,
+                timeout_s=30.0,
+            )
+
+    # Dispatch the narrative. With a connected runner this persists + forwards
+    # the message and starts a turn; otherwise fall back to a history seed.
+    narrative_event = SessionEventInput(
+        type="message",
+        data={"role": "user", "content": [{"type": "input_text", "text": job.narrative}]},
+    )
+    runner_client = await _get_runner_client(session.id, runner_router)
+    conv = await asyncio.to_thread(conversation_store.get_conversation, session.id)
+    if runner_client is not None and conv is not None:
+        # Subscribe to runner output BEFORE forwarding (the stream has no
+        # replay buffer), then dispatch the user message.
+        await _ensure_runner_relay_ready(session.id, runner_id, runner_client, conversation_store)
+        await _dispatch_session_event_to_runner(
+            session.id,
+            conv,
+            narrative_event,
+            conversation_store,
+            runner_client,
+            agent_name=agent_id,
+            file_store=file_store,
+            artifact_store=artifact_store,
+            created_by=attribution_user(user_id),
+            runner_router=runner_router,
+        )
+    else:
+        # No runner available — seed the narrative as history so the session
+        # opens with the prompt ready to send manually.
+        from omnigent.entities import NewConversationItem, parse_item_data
+
+        await asyncio.to_thread(
+            conversation_store.append,
+            session.id,
+            [
+                NewConversationItem(
+                    type="message",
+                    response_id="seed",
+                    data=parse_item_data("message", narrative_event.data),
+                    created_by=attribution_user(user_id),
+                )
+            ],
+        )
 
     return await asyncio.to_thread(
         job_store.create_run,
@@ -355,7 +601,9 @@ def create_jobs_router(
         user_id = require_user(request, auth_provider)
         await _load_owned_job(job_id, user_id)
         runs = await asyncio.to_thread(job_store.list_runs, job_id=job_id, status=status)
-        reconciled = [await asyncio.to_thread(_reconcile_run, r, job_store) for r in runs]
+        reconciled = [
+            await asyncio.to_thread(_reconcile_run, r, job_store, conversation_store) for r in runs
+        ]
         # Re-apply the status filter post-reconcile so a now-finished run
         # doesn't linger in a ``?status=running`` view.
         if status is not None:
@@ -370,7 +618,7 @@ def create_jobs_router(
         if run is not None:
             # Enforce ownership via the parent job (404 on miss/cross-tenant).
             await _load_owned_job(run.job_id, user_id)
-            run = await asyncio.to_thread(_reconcile_run, run, job_store)
+            run = await asyncio.to_thread(_reconcile_run, run, job_store, conversation_store)
         if run is None:
             raise OmnigentError(f"Run not found: {run_id!r}", code=ErrorCode.NOT_FOUND)
         return _run_to_response(run)

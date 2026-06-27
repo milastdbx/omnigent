@@ -53,6 +53,15 @@ from omnigent.spec.types import Phase
 # client-tunneled tool calls the same table also stores.
 ELICITATION_PENDING_TOOL_NAME = "__elicitation__"
 
+# Reserved, server-owned session label that puts a session into unattended
+# auto-approve mode: an ASK verdict is granted automatically instead of parking
+# for a human. Set ONLY server-side by the job-run executor (an unattended
+# workflow run has no human to answer an ApprovalCard, so a parked ASK would
+# hang until ``ask_timeout``). It is in the policy-owned ``omnigent.*`` namespace
+# and rejected from client-supplied session-create labels so a caller cannot
+# self-grant a bypass of admin-configured ASK guardrails.
+AUTO_APPROVE_LABEL = "omnigent.auto_approve"
+
 # JSON-RPC method name MCP uses for elicitation requests. Surfaced
 # verbatim on the SSE event envelope so MCP clients can route on the
 # method name they already recognize.
@@ -131,6 +140,18 @@ async def _await_elicitation(
         policy_names=result.deciding_policies or [""],
         content_preview=_truncate(content_preview, limit=1024),
     )
+    # Unattended auto-approve: a job-run session (no human present) grants the
+    # ASK automatically rather than parking until the timeout. The label is
+    # server-set and lives in the policy-owned namespace, so it can't be spoofed
+    # by a client at session create. Applies the ASK-accumulated writes on the
+    # same "approve" path as a human accept (POLICIES.md §7.2), then returns.
+    if policy_engine.labels.get(AUTO_APPROVE_LABEL) == "true":
+        if result.set_labels:
+            policy_engine.apply_label_writes(result.set_labels)
+        if result.state_updates:
+            policy_engine.apply_state_updates(result.state_updates)
+        return True
+
     params_json = build_elicitation_params_json(elicitation)
     register(elicitation_id, task_id, params_json)
     emit(build_elicitation_request_event(elicitation_id, elicitation))

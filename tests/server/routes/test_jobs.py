@@ -12,7 +12,26 @@ import httpx
 import pytest_asyncio
 
 from omnigent.db.utils import generate_agent_id
+from omnigent.server.routes.jobs import _auto_approve_launch_args
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
+
+
+def test_auto_approve_launch_args_per_harness() -> None:
+    """Job runs are unattended, so native harnesses get full-bypass launch args.
+
+    A native harness launched in its default mode would stall on the first
+    approval prompt (no human to answer it). SDK harnesses already default to
+    bypass at spawn, so they need none; unknown harnesses get none.
+    """
+    assert _auto_approve_launch_args("claude-native") == [
+        "--permission-mode",
+        "bypassPermissions",
+    ]
+    assert _auto_approve_launch_args("codex-native") == [
+        "--dangerously-bypass-approvals-and-sandbox"
+    ]
+    assert _auto_approve_launch_args("claude-sdk") is None
+    assert _auto_approve_launch_args(None) is None
 
 
 @pytest_asyncio.fixture()
@@ -183,6 +202,39 @@ async def test_run_job_creates_session_and_run(client: httpx.AsyncClient, agent_
     # The created session exists and carries the narrative as a seed message.
     session = await client.get(f"/v1/sessions/{run['session_id']}")
     assert session.status_code == 200
+
+
+async def test_run_stays_running_until_agent_responds(
+    client: httpx.AsyncClient, agent_id: str
+) -> None:
+    """A fresh run is NOT marked finished before the agent produces output.
+
+    Regression: reconcile derived ``finished`` from a bare ``idle`` session, so
+    a just-launched run (notably native-Claude, which starts asynchronously)
+    flipped to ``finished`` at t=0 with the session having only the seeded user
+    message. The run must stay ``running`` until an agent turn actually runs.
+    In this fixture no runner is bound, so the session only ever holds the
+    seeded user prompt — it must never reconcile to ``finished``.
+    """
+    job = (
+        await client.post(
+            "/v1/jobs",
+            json={
+                "name": "Pending",
+                "graph": _graph(),
+                "narrative": "Do the thing.",
+                "agent_id": agent_id,
+            },
+        )
+    ).json()
+    run = (await client.post(f"/v1/jobs/{job['id']}/run")).json()
+    assert run["status"] == "running"
+
+    # Re-read through reconcile: still running, because no assistant/tool item
+    # exists yet (only the seeded user message).
+    got = (await client.get(f"/v1/runs/{run['id']}")).json()
+    assert got["status"] == "running", got
+    assert got["completed_at"] is None
 
 
 async def test_run_job_without_agent_is_400(client: httpx.AsyncClient) -> None:
