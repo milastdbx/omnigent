@@ -185,6 +185,39 @@ async def test_run_job_creates_session_and_run(client: httpx.AsyncClient, agent_
     assert session.status_code == 200
 
 
+async def test_run_stays_running_until_agent_responds(
+    client: httpx.AsyncClient, agent_id: str
+) -> None:
+    """A fresh run is NOT marked finished before the agent produces output.
+
+    Regression: reconcile derived ``finished`` from a bare ``idle`` session, so
+    a just-launched run (notably native-Claude, which starts asynchronously)
+    flipped to ``finished`` at t=0 with the session having only the seeded user
+    message. The run must stay ``running`` until an agent turn actually runs.
+    In this fixture no runner is bound, so the session only ever holds the
+    seeded user prompt — it must never reconcile to ``finished``.
+    """
+    job = (
+        await client.post(
+            "/v1/jobs",
+            json={
+                "name": "Pending",
+                "graph": _graph(),
+                "narrative": "Do the thing.",
+                "agent_id": agent_id,
+            },
+        )
+    ).json()
+    run = (await client.post(f"/v1/jobs/{job['id']}/run")).json()
+    assert run["status"] == "running"
+
+    # Re-read through reconcile: still running, because no assistant/tool item
+    # exists yet (only the seeded user message).
+    got = (await client.get(f"/v1/runs/{run['id']}")).json()
+    assert got["status"] == "running", got
+    assert got["completed_at"] is None
+
+
 async def test_run_job_without_agent_is_400(client: httpx.AsyncClient) -> None:
     """A job with no bound agent and no default can't run."""
     job = (

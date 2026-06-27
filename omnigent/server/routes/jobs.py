@@ -110,17 +110,46 @@ def _run_to_response(run: Run) -> RunResponse:
     )
 
 
-def _reconcile_run(run: Run, job_store: JobStore) -> Run:
+def _agent_has_responded(conversation_store: ConversationStore, session_id: str) -> bool:
+    """Whether the session's agent has produced any output yet.
+
+    The run seeds one ``user`` message (the narrative); an agent *turn* adds
+    assistant messages, reasoning, or tool calls. Detecting those distinguishes
+    "the turn ran" from "the session was just created and hasn't started" — the
+    session reads ``idle`` in both cases, so the live-status cache alone can't
+    tell them apart (especially for native harnesses that launch a terminal
+    asynchronously).
+
+    :param conversation_store: Store to read conversation items from.
+    :param session_id: The run's session id.
+    :returns: ``True`` once any agent-produced item exists.
+    """
+    page = conversation_store.list_items(session_id, limit=50, order="asc")
+    for item in page.data:
+        if item.type in ("function_call", "function_call_output", "reasoning", "native_tool"):
+            return True
+        # An assistant message means the agent replied (the seed is role=user).
+        if item.type == "message" and getattr(item.data, "role", None) == "assistant":
+            return True
+    return False
+
+
+def _reconcile_run(run: Run, job_store: JobStore, conversation_store: ConversationStore) -> Run:
     """Reconcile a still-``running`` run's status from its session.
 
     A run is recorded ``running`` at creation. Since a promptgen run is just an
-    agent session (no DAG), the terminal state is derived from the underlying
-    session's live status: a ``failed`` session fails the run; an ``idle``
-    session (loop finished or never started) marks it ``finished``. The
-    reconciled state is persisted so subsequent reads are cheap.
+    agent session (no DAG), the terminal state is derived from the session: a
+    ``failed`` session fails the run; an ``idle`` session marks the run
+    ``finished`` **only once the agent has actually produced output**. The
+    second condition matters because a freshly-launched session (notably a
+    native-Claude terminal, which starts asynchronously) reads ``idle`` before
+    its first turn — without the output check the run would flip to ``finished``
+    at t=0, before anything happened. The reconciled state is persisted so
+    subsequent reads are cheap.
 
     :param run: The run to reconcile.
     :param job_store: Store used to persist a terminal transition.
+    :param conversation_store: Store used to check for agent output.
     :returns: The (possibly updated) run.
     """
     if run.status != RUN_STATUS_RUNNING or run.session_id is None:
@@ -131,11 +160,12 @@ def _reconcile_run(run: Run, job_store: JobStore) -> Run:
             run.id, status=RUN_STATUS_FAILED, completed_at=now_epoch()
         )
         return updated or run
-    if session_status == "idle":
+    if session_status == "idle" and _agent_has_responded(conversation_store, run.session_id):
         updated = job_store.update_run_status(
             run.id, status=RUN_STATUS_FINISHED, completed_at=now_epoch()
         )
         return updated or run
+    # Still running, or idle-but-not-yet-started: leave as ``running``.
     return run
 
 
@@ -509,7 +539,10 @@ def create_jobs_router(
         user_id = require_user(request, auth_provider)
         await _load_owned_job(job_id, user_id)
         runs = await asyncio.to_thread(job_store.list_runs, job_id=job_id, status=status)
-        reconciled = [await asyncio.to_thread(_reconcile_run, r, job_store) for r in runs]
+        reconciled = [
+            await asyncio.to_thread(_reconcile_run, r, job_store, conversation_store)
+            for r in runs
+        ]
         # Re-apply the status filter post-reconcile so a now-finished run
         # doesn't linger in a ``?status=running`` view.
         if status is not None:
@@ -524,7 +557,7 @@ def create_jobs_router(
         if run is not None:
             # Enforce ownership via the parent job (404 on miss/cross-tenant).
             await _load_owned_job(run.job_id, user_id)
-            run = await asyncio.to_thread(_reconcile_run, run, job_store)
+            run = await asyncio.to_thread(_reconcile_run, run, job_store, conversation_store)
         if run is None:
             raise OmnigentError(f"Run not found: {run_id!r}", code=ErrorCode.NOT_FOUND)
         return _run_to_response(run)
