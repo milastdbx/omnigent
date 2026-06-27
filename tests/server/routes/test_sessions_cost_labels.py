@@ -32,6 +32,7 @@ from omnigent.runner.identity import (
     RUNNER_TUNNEL_TOKEN_HEADER,
     token_bound_runner_id,
 )
+from omnigent.runtime.policies.approval import AUTO_APPROVE_LABEL
 from omnigent.server.auth import LEVEL_EDIT, LEVEL_OWNER, UnifiedAuthProvider
 from omnigent.server.routes.sessions import create_sessions_router
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
@@ -407,6 +408,26 @@ def test_create_session_rejects_cost_control_label_seed(
     )
     assert resp.status_code == 400
     assert "cost_control" in resp.json()["error"]["message"]
+
+
+def test_create_session_rejects_auto_approve_label_seed(
+    stores: tuple[SqlAlchemyConversationStore, SqlAlchemyAgentStore, SqlAlchemyPermissionStore],
+) -> None:
+    """``POST /v1/sessions`` seeding ``omnigent.auto_approve`` fails 400.
+
+    The label is server-owned (only a job run sets it, post-create). If a client
+    could seed it, they'd self-grant a bypass of admin-configured ASK policies.
+    """
+    _seed_session(stores)  # ensures ag_test exists
+    app = _multi_user_app(stores)
+
+    resp = TestClient(app).post(
+        "/v1/sessions",
+        json={"agent_id": "ag_test", "labels": {AUTO_APPROVE_LABEL: "true"}},
+        headers={"X-Forwarded-Email": ALICE, "Origin": OMNIGENT_INTERNAL_WS_ORIGIN},
+    )
+    assert resp.status_code == 400
+    assert "auto_approve" in resp.json()["error"]["message"]
 
 
 def test_bundled_create_rejects_cost_control_label_seed(

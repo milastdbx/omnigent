@@ -42,6 +42,7 @@ from omnigent.native_coding_agents import (
 )
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runtime.agent_cache import AgentCache
+from omnigent.runtime.policies.approval import AUTO_APPROVE_LABEL
 from omnigent.server.auth import LEVEL_OWNER, AuthProvider
 from omnigent.server.routes._auth_helpers import attribution_user, require_user
 from omnigent.server.routes.hosts import _proxy_list_dir
@@ -385,6 +386,16 @@ async def _execute_job_run(
         await asyncio.to_thread(permission_store.ensure_user, user_id)
         await asyncio.to_thread(permission_store.grant, user_id, session.id, LEVEL_OWNER)
     _announce_session_added(user_id, session.id)
+
+    # Unattended auto-approve: a job run has no human to answer an ApprovalCard,
+    # so a policy ASK would hang the run until its timeout. Stamp the server-owned
+    # label that makes the policy engine grant ASK verdicts automatically. Set
+    # here (post-create) rather than via the create body, since that body rejects
+    # this policy-owned namespace. This covers Omnigent policy-engine ASKs; the
+    # harness's own permission prompts are handled by terminal_launch_args above.
+    await asyncio.to_thread(
+        conversation_store.set_labels, session.id, {AUTO_APPROVE_LABEL: "true"}
+    )
 
     # Launch a runner on the host and wait for it to connect, then dispatch.
     runner_id: str | None = None

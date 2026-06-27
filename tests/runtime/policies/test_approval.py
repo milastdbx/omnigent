@@ -43,6 +43,7 @@ import pytest
 from omnigent.policies.function import FunctionPolicy
 from omnigent.policies.types import ElicitationRequest, PolicyResult
 from omnigent.runtime.policies.approval import (
+    AUTO_APPROVE_LABEL,
     ELICITATION_PENDING_TOOL_NAME,
     _await_elicitation,
     _parse_verdict,
@@ -392,6 +393,51 @@ async def test_accept_applies_labels(
     conv = conversation_store.get_conversation(engine.conversation_id)
     assert conv is not None
     assert conv.labels == {"integrity": "0"}
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_label_grants_without_parking(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """A session marked unattended auto-approves the ASK without parking.
+
+    The ``omnigent.auto_approve`` label (set server-side for job runs) makes
+    ``_await_elicitation`` grant the ASK immediately — it must NOT register,
+    emit, or park (the park here would TimeoutError, so reaching it fails the
+    test). The ASK-accumulated labels still land, on the same approve path a
+    human accept takes.
+    """
+    policy = _ask_policy("gate", set_labels={"integrity": "0"})
+    conv = conversation_store.create_conversation()
+    engine = PolicyEngine(
+        policies=[policy],
+        label_defs={},
+        ask_timeout=30,
+        conversation_id=conv.id,
+        initial_labels={AUTO_APPROVE_LABEL: "true"},
+        conversation_store=conversation_store,
+    )
+    recorder = _Recorder()
+    result = _composed_ask(deciding_policy="gate", set_labels={"integrity": "0"})
+
+    accepted = await _await_elicitation(
+        task_id="task_1",
+        root_task_id="task_1",
+        result=result,
+        phase=Phase.REQUEST,
+        content_preview="hello",
+        policy_engine=engine,
+        register=recorder.register,
+        emit=recorder.emit,
+        park=_timing_out_park(),  # reaching park would TimeoutError → not accepted
+    )
+    assert accepted is True
+    # Auto-approved before the interactive seams fired.
+    assert recorder.registered == []
+    assert recorder.emitted == []
+    # The ASK's writes still applied (same as a human accept).
+    assert engine.labels[AUTO_APPROVE_LABEL] == "true"
+    assert engine.labels["integrity"] == "0"
 
 
 @pytest.mark.asyncio

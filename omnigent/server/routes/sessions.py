@@ -128,6 +128,7 @@ from omnigent.runtime import (
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import (
     _ELICITATION_MODE,
+    AUTO_APPROVE_LABEL,
     build_elicitation_request_event,
     resolve_ask_timeout,
 )
@@ -11538,6 +11539,14 @@ def _reject_reserved_cost_control_label_seed(labels: dict[str, str]) -> None:
             f"labels {', '.join(repr(key) for key in reserved)} "
             f"are in the policy-owned {COST_CONTROL_LABEL_NAMESPACE}* "
             "namespace and cannot be set at session creation",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    # The unattended auto-approve label is server-owned: only the job-run
+    # executor sets it (after create), never a client. Otherwise a caller could
+    # self-grant a bypass of admin-configured ASK guardrails.
+    if AUTO_APPROVE_LABEL in labels:
+        raise OmnigentError(
+            f"label {AUTO_APPROVE_LABEL!r} is server-owned and cannot be set at session creation",
             code=ErrorCode.INVALID_INPUT,
         )
 
