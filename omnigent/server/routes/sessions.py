@@ -19216,6 +19216,32 @@ def create_sessions_router(
             )
         return _to_agent_object(agent, agent_cache)
 
+    @router.get("/sessions/{session_id}/inflight-preview")
+    async def get_session_inflight_preview(
+        request: Request,
+        session_id: str,
+    ) -> dict[str, str]:
+        """
+        Return the session's in-flight assistant text streamed so far.
+
+        A lightweight, non-SSE read of the server's in-flight text buffer (the
+        same one the ``/stream`` reconnect snapshot replays). Native-harness
+        turns aren't persisted as conversation items mid-turn, so the jobs
+        "Status" affordance can't read the current step from ``/items``; this
+        surfaces the live "streamed-so-far" text instead. Empty ``text`` means
+        no turn is currently streaming (idle / between turns).
+
+        :param request: The incoming FastAPI request.
+        :param session_id: Session identifier, e.g. ``"conv_abc123"``.
+        :returns: ``{"text": <streamed-so-far text>}`` (``text`` may be empty).
+        :raises OmnigentError: If the session is not found / not accessible.
+        """
+        user_id = _require_user(request, auth_provider)
+        await _require_access_and_level(
+            user_id, session_id, LEVEL_READ, permission_store, conversation_store
+        )
+        return {"text": inflight_text.latest_text_for(session_id)}
+
     @router.get(
         "/sessions/{session_id}/agent/contents",
         response_class=Response,

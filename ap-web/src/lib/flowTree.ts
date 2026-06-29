@@ -17,6 +17,8 @@
 
 import type { FlowEdge, FlowGraph, FlowNode, FlowNodeType } from "./flowToText";
 
+export const LAUNCH_SUB_AGENT_ACTION_ID = "ent_builtin_omnigent_launch_sub_agent";
+
 export interface FlowStep {
   id: string;
   type: FlowNodeType;
@@ -120,6 +122,11 @@ export function repairActionSteps(
     if (!s.actionId) return s;
     const def = lookup(s.actionId);
     if (!def) return s;
+    if (s.actionId === LAUNCH_SUB_AGENT_ACTION_ID) {
+      const instruction = s.instruction ?? def.instruction;
+      if (s.label === def.label && s.instruction === instruction) return s;
+      return { ...s, label: def.label, instruction };
+    }
     if (s.label === def.label && s.instruction === def.instruction) return s;
     return { ...s, label: def.label, instruction: def.instruction };
   });
@@ -163,6 +170,11 @@ export function attachAction(
 /** Rename a step's label. */
 export function setLabel(root: FlowStep, id: string, label: string): FlowStep {
   return mapTree(root, (s) => (s.id === id ? { ...s, label } : s));
+}
+
+/** Patch a step's per-use instruction text. */
+export function setInstruction(root: FlowStep, id: string, instruction: string): FlowStep {
+  return mapTree(root, (s) => (s.id === id ? { ...s, instruction } : s));
 }
 
 /** Rename a decision branch label (`yes`/`no`). */
@@ -220,7 +232,13 @@ export function treeToGraph(root: FlowStep): FlowGraph {
     edges.push({ id: `e_${from}_${to}`, from, to, label });
 
   function walk(step: FlowStep) {
-    nodes.push({ id: step.id, type: step.type, label: step.label, x: 0, y: 0 });
+    const instruction =
+      step.actionId === LAUNCH_SUB_AGENT_ACTION_ID ? step.instruction?.trim() : undefined;
+    const label =
+      instruction && instruction !== step.label.trim()
+        ? `${step.label}\n${instruction}`
+        : step.label;
+    nodes.push({ id: step.id, type: step.type, label, x: 0, y: 0 });
     if (step.type === "decision") {
       if (step.yes) {
         edge(step.id, step.yes.id, step.yesLabel || "Yes");

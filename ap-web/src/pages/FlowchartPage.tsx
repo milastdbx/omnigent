@@ -9,9 +9,8 @@
  * there are no manual edges; the tree's structure *is* the connections.
  *
  * The editable model is a {@link FlowStep} tree (see `@/lib/flowTree`),
- * persisted on the job. For the output panel (Narrative / Outline / Mermaid)
- * and runs, the tree is converted to the flat {@link FlowGraph} the generator
- * consumes via {@link treeToGraph}, so nothing downstream changed.
+ * persisted on the job. Runs convert the tree to the persisted narrative in the
+ * job store, so nothing downstream changed.
  *
  * Double-click a step to rename it; double-click a branch label to edit it;
  * each step has a delete (which removes it and everything below).
@@ -22,7 +21,6 @@ import {
   ActivityIcon,
   ArrowLeftIcon,
   CheckCircle2Icon,
-  CopyIcon,
   Loader2Icon,
   PlayIcon,
   PlusIcon,
@@ -30,13 +28,10 @@ import {
   Trash2Icon,
   XCircleIcon,
 } from "lucide-react";
-import { MessageResponse } from "@/components/ai-elements/message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Link, useNavigate, useParams } from "@/lib/routing";
-import { generateFlowText } from "@/lib/flowToText";
 import type { FlowNodeType } from "@/lib/flowToText";
 import {
   ADDABLE_TYPES,
@@ -46,16 +41,17 @@ import {
   countSteps,
   defaultLabel,
   deleteStep,
+  LAUNCH_SUB_AGENT_ACTION_ID,
   newStep,
   setBranchLabel,
+  setInstruction,
   setLabel,
-  treeToGraph,
   type FlowStep,
   type Slot,
 } from "@/lib/flowTree";
 import { runJob, updateJob, useJob, type Run } from "@/lib/jobsStore";
-import { getSession } from "@/lib/sessionsApi";
-import { fetchLastAssistantText } from "@/lib/lastAssistantText";
+import { getSession, fetchInflightPreview } from "@/lib/sessionsApi";
+import { fetchLastAssistantText, previewText } from "@/lib/lastAssistantText";
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
 import { useHosts } from "@/hooks/useHosts";
 import { getIconComponent } from "@/components/icons/iconRegistry";
@@ -205,6 +201,7 @@ interface StepViewProps {
   onAdd: (parentId: string, slot: Slot, type: FlowNodeType) => void;
   onAddAction: (parentId: string, slot: Slot, action: ActionDef, group: ActionGroup) => void;
   onRename: (id: string, label: string) => void;
+  onInstructionChange: (id: string, instruction: string) => void;
   onRenameBranch: (id: string, branch: "yes" | "no", label: string) => void;
   onDelete: (id: string) => void;
   groups: ActionGroup[];
@@ -298,6 +295,7 @@ function StepView({
   onAdd,
   onAddAction,
   onRename,
+  onInstructionChange,
   onRenameBranch,
   onDelete,
   groups,
@@ -305,13 +303,26 @@ function StepView({
 }: StepViewProps) {
   const meta = KIND_META[step.type];
   // Shared props for every nested StepView so the catalog threads down.
-  const childProps = { onAdd, onAddAction, onRename, onRenameBranch, onDelete, groups, loadingGroups };
+  const childProps = {
+    onAdd,
+    onAddAction,
+    onRename,
+    onInstructionChange,
+    onRenameBranch,
+    onDelete,
+    groups,
+    loadingGroups,
+  };
   // An action step carries its source group's name; find that group in the
   // catalog to render its icon (built-in component or uploaded image) on the
   // box's left, matching how the picker presents it.
   const stepGroup = step.actionGroup
     ? groups.find((g) => g.name === step.actionGroup)
     : undefined;
+  const isLaunchSubAgentStep = step.actionId === LAUNCH_SUB_AGENT_ACTION_ID;
+  const isFixedSourceStep =
+    step.actionId?.startsWith("job:") ||
+    (step.actionId?.startsWith("ent_builtin_") && !isLaunchSubAgentStep);
   return (
     <div className="flex flex-col items-center">
       {/* The box. `relative z-10` lifts it above the branch-connector
@@ -331,10 +342,11 @@ function StepView({
                 steps show their node-type tag. */}
             {step.actionGroup ?? meta.tag}
           </span>
-          {/* A wired-in job's label IS the job's name — it must mirror the source
-              job, so it's shown read-only (editing it here would desync the two).
-              Entity and generic steps stay inline-editable. */}
-          {step.actionId?.startsWith("job:") ? (
+          {/* Steps backed by a fixed source are read-only here: a wired-in job
+              (``job:`` — its label IS the job's name) and code-owned built-ins.
+              Launch sub-agent is the exception: its title stays fixed, but its
+              per-use task text is editable below. */}
+          {isFixedSourceStep || isLaunchSubAgentStep ? (
             <span className="text-sm break-words">{step.label}</span>
           ) : (
             <InlineEdit
@@ -344,6 +356,18 @@ function StepView({
               inputClassName="text-sm"
             />
           )}
+          {isLaunchSubAgentStep ? (
+            <textarea
+              aria-label="Sub-agent task"
+              value={step.instruction ?? ""}
+              placeholder="Describe what the sub-agent should do…"
+              rows={3}
+              onChange={(e) => onInstructionChange(step.id, e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              className="mt-2 w-full resize-y rounded-md border border-input bg-background px-2 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          ) : null}
         </div>
         {/* Delete (not on the Start root — a flow always has a Start). Shown on
             hover/focus-within; z-20 keeps it clickable above everything. */}
@@ -436,11 +460,6 @@ function StepView({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Page
-// ---------------------------------------------------------------------------
-type OutputTab = "narrative" | "mermaid" | "runs";
-
 export function FlowchartPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const navigate = useNavigate();
@@ -478,8 +497,6 @@ export function FlowchartPage() {
     }
   }, [job, seededFor, actionLookup]);
 
-  const [tab, setTab] = useState<OutputTab>("narrative");
-  const [copied, setCopied] = useState(false);
   const [saved, setSaved] = useState(false);
   const [running, setRunning] = useState(false);
 
@@ -553,8 +570,6 @@ export function FlowchartPage() {
     [jobId, scheduleEnabled],
   );
 
-  // Tree → flat graph → text. Pure & cheap, recompute on every edit.
-  const result = useMemo(() => generateFlowText(treeToGraph(tree)), [tree]);
   const stepCount = countSteps(tree);
   const hasSteps = stepCount > 1; // more than the lone Start
 
@@ -569,12 +584,24 @@ export function FlowchartPage() {
       // The step's *label* is the concise title (one clean narrative line); the
       // full instruction is stored separately for when the flow actually runs.
       setTree((t) =>
-        attachAction(t, parentId, slot, action.id, action.label, group.name, action.instruction),
+        attachAction(
+          t,
+          parentId,
+          slot,
+          action.id,
+          action.label,
+          group.name,
+          action.id === LAUNCH_SUB_AGENT_ACTION_ID ? "" : action.instruction,
+        ),
       ),
     [],
   );
   const onRename = useCallback(
     (id: string, label: string) => setTree((t) => setLabel(t, id, label)),
+    [],
+  );
+  const onInstructionChange = useCallback(
+    (id: string, instruction: string) => setTree((t) => setInstruction(t, id, instruction)),
     [],
   );
   const onRenameBranch = useCallback(
@@ -598,10 +625,8 @@ export function FlowchartPage() {
   const onRun = useCallback(async () => {
     if (!jobId || running) return;
     setRunning(true);
-    // Surface the run in the Runs tab but DON'T navigate into its session —
-    // the run executes in the background; the user opens it from the Runs tab
+    // The run executes in the background; the user opens it from the Runs panel
     // when they choose to.
-    setTab("runs");
     try {
       // Persist the on-screen tree first so the run uses the current flow.
       await updateJob(jobId, { tree });
@@ -612,16 +637,6 @@ export function FlowchartPage() {
       setRunning(false);
     }
   }, [jobId, tree, running]);
-
-  const copyOutput = useCallback(() => {
-    // The "Narrative" tab renders the outline text (the old free-form narrative
-    // tab was removed and this one renamed).
-    const text = tab === "mermaid" ? result.mermaid : result.outline;
-    void navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    });
-  }, [tab, result]);
 
   // Stale/deleted job → bounce back to the list. Wait for the API fetch to
   // settle first so the loading window doesn't flash this.
@@ -770,6 +785,7 @@ export function FlowchartPage() {
               onAdd={onAdd}
               onAddAction={onAddAction}
               onRename={onRename}
+              onInstructionChange={onInstructionChange}
               onRenameBranch={onRenameBranch}
               onDelete={onDelete}
               groups={groups}
@@ -778,59 +794,19 @@ export function FlowchartPage() {
           </div>
         </div>
 
-        {/* Output panel */}
+        {/* Runs panel */}
         <aside className="flex w-[420px] min-w-[300px] flex-col border-l border-border bg-card">
-          <Tabs
-            value={tab}
-            onValueChange={(v) => setTab(v as OutputTab)}
-            className="flex min-h-0 flex-1 flex-col gap-0"
-          >
-            <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-              <TabsList variant="line" className="flex-1">
-                <TabsTrigger value="narrative">Narrative</TabsTrigger>
-                <TabsTrigger value="mermaid">Mermaid</TabsTrigger>
-                <TabsTrigger value="runs">
-                  Runs{job && job.runs.length > 0 ? ` (${job.runs.length})` : ""}
-                </TabsTrigger>
-              </TabsList>
-              {tab !== "runs" && (
-                <Button variant="outline" size="sm" onClick={copyOutput} disabled={!hasSteps}>
-                  <CopyIcon className="size-3.5" /> {copied ? "Copied!" : "Copy"}
-                </Button>
-              )}
-            </div>
-
-            <div className="border-b border-border px-4 py-2 text-xs text-muted-foreground">
-              {hasSteps ? result.summary : "Click the + below Start to add your first step."}
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-auto">
-              <TabsContent value="narrative" className="p-4">
-                {result.outline ? (
-                  <pre className="font-mono text-xs leading-relaxed whitespace-pre-wrap">
-                    {result.outline}
-                  </pre>
-                ) : (
-                  <p className="text-sm text-muted-foreground italic">Nothing to show yet.</p>
-                )}
-              </TabsContent>
-              <TabsContent value="mermaid" className="flex flex-col gap-3 p-4">
-                {result.mermaid ? (
-                  <>
-                    <MessageResponse>{"```mermaid\n" + result.mermaid + "\n```"}</MessageResponse>
-                    <pre className="rounded-md border border-border bg-muted/40 p-3 font-mono text-xs whitespace-pre-wrap">
-                      {result.mermaid}
-                    </pre>
-                  </>
-                ) : (
-                  <p className="text-sm text-muted-foreground italic">Nothing to show yet.</p>
-                )}
-              </TabsContent>
-              <TabsContent value="runs" className="p-4">
-                <RunsList runs={job?.runs ?? []} />
-              </TabsContent>
-            </div>
-          </Tabs>
+          <div className="flex items-center gap-2 border-b border-border px-4 py-2">
+            <h2 className="text-sm font-medium">
+              Runs{job && job.runs.length > 0 ? ` (${job.runs.length})` : ""}
+            </h2>
+          </div>
+          <div className="border-b border-border px-4 py-2 text-xs text-muted-foreground">
+            {hasSteps ? "Run history for this flow." : "Click the + below Start to add your first step."}
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto p-4">
+            <RunsList runs={job?.runs ?? []} />
+          </div>
         </aside>
       </div>
     </div>
@@ -871,17 +847,30 @@ function RunStatusButton({ run }: { run: Run }) {
     setLoading(true);
     setError(null);
     try {
-      const [session, latest] = await Promise.all([
+      // Progress signal, best-first:
+      //   1. `run.progress` — captured server-side into the run row by the
+      //      run's own stream subscriber; works for unattended background runs
+      //      and persists after completion (the durable signal).
+      //   2. `inflight` — live streamed-so-far text (covers a just-started run
+      //      whose first write hasn't landed yet).
+      //   3. `committed` — last persisted assistant message (SDK runs).
+      const [session, inflight, committed] = await Promise.all([
         getSession(run.sessionId).catch(() => null),
+        fetchInflightPreview(run.sessionId),
         fetchLastAssistantText(run.sessionId, 240).catch(() => undefined),
       ]);
       setStatus(session?.status ?? null);
-      setProgress(latest ?? null);
+      const progressText =
+        run.progress ||
+        (inflight && previewText(inflight, 240)) ||
+        committed ||
+        null;
+      setProgress(progressText);
       if (!session) setError("Couldn't reach the session.");
     } finally {
       setLoading(false);
     }
-  }, [run.sessionId]);
+  }, [run.sessionId, run.progress]);
 
   const onToggle = useCallback(() => {
     setOpen((wasOpen) => {

@@ -42,6 +42,13 @@ BUILTIN_GROUPS: tuple[EntityGroup, ...] = (
         name="GitHub",
         icon_key="github",
     ),
+    EntityGroup(
+        id="grp_builtin_omnigent",
+        created_at=0,
+        updated_at=0,
+        name="Omnigent",
+        icon_key="otto",
+    ),
 )
 
 # Built-in entities (actions), grouped via ``group_id``. Order is preserved
@@ -97,6 +104,15 @@ BUILTIN_ENTITIES: tuple[Entity, ...] = (
         instruction="Address the review comments on the GitHub pull request and push the updates.",
         backing_prompt="Use the GitHub MCP to read the pull request review comments with the current credentials, then make and push the changes that resolve them.",
         group_id="grp_builtin_github",
+    ),
+    Entity(
+        id="ent_builtin_omnigent_launch_sub_agent",
+        created_at=0,
+        updated_at=0,
+        title="Launch sub-agent",
+        instruction="Launch a sub-agent for the task described in this step, wait for it to finish, and use its result before continuing.",
+        backing_prompt="Use the available sub-agent/task mechanism to delegate the task described in this step. Wait for the sub-agent to complete, then continue the flow using its result.",
+        group_id="grp_builtin_omnigent",
     ),
 )
 

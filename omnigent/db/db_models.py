@@ -885,6 +885,9 @@ class SqlRun(Base):
     started_at: Mapped[int] = mapped_column(Integer)
     completed_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Latest step/progress text captured from the run's agent stream, for the
+    # jobs "Status" affordance. Updated live during the run; persists after.
+    progress: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     __table_args__ = (

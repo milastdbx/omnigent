@@ -207,3 +207,12 @@ class SqlAlchemyJobStore(JobStore):
             if error is not None:
                 row.error = error
             return sql_run_to_entity(row)
+
+    def update_run_progress(self, run_id: str, *, progress: str) -> Run | None:
+        """Update a run's progress text. See :meth:`JobStore.update_run_progress`."""
+        with self._session() as session:
+            row = session.get(SqlRun, run_id)
+            if not row:
+                return None
+            row.progress = progress
+            return sql_run_to_entity(row)

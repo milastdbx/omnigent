@@ -4018,6 +4018,8 @@ class RunResponse(BaseModel):
     :param completed_at: Unix epoch seconds of the terminal state, or
         ``None`` while running.
     :param error: Failure detail when ``status == "failed"``, else ``None``.
+    :param progress: Latest step/progress text captured from the run's agent
+        stream, for the "Status" affordance. ``""`` when nothing captured yet.
     :param trigger: How the run was triggered — ``"adhoc"`` (manual "Run now")
         or ``"scheduled"`` (the time-trigger scheduler).
     """
@@ -4030,4 +4032,5 @@ class RunResponse(BaseModel):
     started_at: int
     completed_at: int | None = None
     error: str | None = None
+    progress: str = ""
     trigger: str = "adhoc"

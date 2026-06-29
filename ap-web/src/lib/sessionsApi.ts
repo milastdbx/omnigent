@@ -710,6 +710,27 @@ export async function getSession(sessionId: string): Promise<Session> {
 }
 
 /**
+ * The session's in-flight assistant text streamed so far (a non-SSE read of the
+ * server's live-text buffer). Native-harness turns aren't persisted as items
+ * mid-turn, so this is how the jobs "Status" affordance reads the current step.
+ * Returns `""` when no turn is streaming. Best-effort: resolves `""` on error.
+ *
+ * :param sessionId: Session/conversation id, e.g. `"conv_abc123"`.
+ */
+export async function fetchInflightPreview(sessionId: string): Promise<string> {
+  try {
+    const res = await authenticatedFetch(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/inflight-preview`,
+    );
+    if (!res.ok) return "";
+    const body = (await res.json()) as { text?: string };
+    return typeof body.text === "string" ? body.text : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Snapshot a session WITHOUT its committed items or liveness fields.
  *
  * Use this (not `getSession`) when the caller hydrates the transcript

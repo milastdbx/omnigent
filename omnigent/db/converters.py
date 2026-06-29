@@ -63,6 +63,7 @@ def sql_run_to_entity(row: SqlRun) -> Run:
         started_at=row.started_at,
         completed_at=row.completed_at,
         error=row.error,
+        progress=row.progress,
         created_by=row.created_by,
         trigger=row.trigger,
     )

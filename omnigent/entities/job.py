@@ -80,6 +80,8 @@ class Run:
     :param completed_at: Unix epoch seconds the run reached a terminal
         state, or ``None`` while still running.
     :param error: Failure detail when ``status == "failed"``, else ``None``.
+    :param progress: Latest step/progress text captured from the run's agent
+        stream, for the "Status" affordance. ``""`` when nothing captured yet.
     :param created_by: Owning user id, or ``None`` in single-user mode.
     :param trigger: How the run was triggered — ``adhoc`` (manual "Run now")
         or ``scheduled`` (spawned by the time-trigger scheduler).
@@ -92,5 +94,6 @@ class Run:
     started_at: int
     completed_at: int | None = None
     error: str | None = None
+    progress: str = ""
     created_by: str | None = None
     trigger: str = RUN_TRIGGER_ADHOC
