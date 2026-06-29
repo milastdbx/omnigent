@@ -12,26 +12,28 @@ import httpx
 import pytest_asyncio
 
 from omnigent.db.utils import generate_agent_id
-from omnigent.server.routes.jobs import _auto_approve_launch_args
+from omnigent.server.routes.jobs import _EXECUTION_SYSTEM_PROMPT, _native_launch_args
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 
 
-def test_auto_approve_launch_args_per_harness() -> None:
-    """Job runs are unattended, so native harnesses get full-bypass launch args.
+def test_native_launch_args_per_harness() -> None:
+    """Job runs are unattended, so native harnesses get non-prompting launch args.
 
     A native harness launched in its default mode would stall on the first
-    approval prompt (no human to answer it). SDK harnesses already default to
-    bypass at spawn, so they need none; unknown harnesses get none.
+    approval prompt (no human to answer it). SDK harnesses handle approval mode
+    inside the harness, so they need no terminal args; unknown harnesses get none.
     """
-    assert _auto_approve_launch_args("claude-native") == [
+    assert _native_launch_args("claude-native") == [
         "--permission-mode",
-        "bypassPermissions",
+        "auto",
+        "--append-system-prompt",
+        _EXECUTION_SYSTEM_PROMPT,
     ]
-    assert _auto_approve_launch_args("codex-native") == [
+    assert _native_launch_args("codex-native") == [
         "--dangerously-bypass-approvals-and-sandbox"
     ]
-    assert _auto_approve_launch_args("claude-sdk") is None
-    assert _auto_approve_launch_args(None) is None
+    assert _native_launch_args("claude-sdk") is None
+    assert _native_launch_args(None) is None
 
 
 @pytest_asyncio.fixture()
