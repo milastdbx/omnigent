@@ -86,22 +86,33 @@ function GroupCard({ group }: { group: EntityGroup }) {
 function EntityCard({ entity, groups }: { entity: Entity; groups: EntityGroup[] }) {
   const [title, setTitle] = useState(entity.title);
   const [instruction, setInstruction] = useState(entity.instruction);
-  const dirty = title !== entity.title || instruction !== entity.instruction;
+  const [backingPrompt, setBackingPrompt] = useState(entity.backingPrompt);
+  const dirty =
+    title !== entity.title ||
+    instruction !== entity.instruction ||
+    backingPrompt !== entity.backingPrompt;
 
   if (entity.isBuiltin) {
     // Built-in entities are read-only: show title + group, no editing.
     const group = groups.find((g) => g.id === entity.groupId);
     return (
-      <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-4">
-        {group ? (
-          <GroupIcon group={group} className="size-5 shrink-0 text-muted-foreground" />
-        ) : (
-          <BlocksIcon className="size-5 shrink-0 text-muted-foreground" />
-        )}
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">{entity.title}</span>
-        <span className="text-[11px] text-muted-foreground">
-          {group ? `${group.name} · built-in` : "built-in"}
-        </span>
+      <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-card p-4">
+        <div className="flex items-center gap-3">
+          {group ? (
+            <GroupIcon group={group} className="size-5 shrink-0 text-muted-foreground" />
+          ) : (
+            <BlocksIcon className="size-5 shrink-0 text-muted-foreground" />
+          )}
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{entity.title}</span>
+          <span className="text-[11px] text-muted-foreground">
+            {group ? `${group.name} · built-in` : "built-in"}
+          </span>
+        </div>
+        {entity.backingPrompt ? (
+          <p className="pl-8 text-[11px] text-muted-foreground">
+            <span className="font-medium">Backing prompt (hidden):</span> {entity.backingPrompt}
+          </p>
+        ) : null}
       </div>
     );
   }
@@ -123,6 +134,13 @@ function EntityCard({ entity, groups }: { entity: Entity; groups: EntityGroup[] 
             placeholder="Instruction text (folded into the flow when this entity is used)"
             rows={2}
             className="w-full resize-y rounded-md border border-input bg-background px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          <textarea
+            value={backingPrompt}
+            onChange={(e) => setBackingPrompt(e.target.value)}
+            placeholder="Backing prompt (hidden — sent to the agent at run time, never shown to the user, e.g. which MCP/tool to use)"
+            rows={2}
+            className="w-full resize-y rounded-md border border-dashed border-input bg-muted/30 px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <div className="flex items-center gap-2">
             <select
@@ -147,7 +165,11 @@ function EntityCard({ entity, groups }: { entity: Entity; groups: EntityGroup[] 
               size="sm"
               disabled={!dirty || !title.trim()}
               onClick={() =>
-                updateEntity(entity.id, { title: title.trim(), instruction: instruction.trim() })
+                updateEntity(entity.id, {
+                  title: title.trim(),
+                  instruction: instruction.trim(),
+                  backingPrompt: backingPrompt.trim(),
+                })
               }
             >
               Save

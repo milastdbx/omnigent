@@ -35,6 +35,7 @@ from omnigent.entities import (
     Job,
     Run,
 )
+from omnigent.entities.builtins import get_builtin_entity
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.native_coding_agents import (
@@ -69,6 +70,7 @@ from omnigent.server.schemas import (
 from omnigent.stores.agent_store import AgentStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.conversation_store import ConversationStore
+from omnigent.stores.entity_store import EntityStore
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.job_store import JobStore
 from omnigent.stores.permission_store import PermissionStore
@@ -278,7 +280,7 @@ async def _resolve_host_home(host_registry: object, host_conn: object) -> str | 
     return first_path[:slash] if slash > 0 else "/"
 
 
-def _native_launch_args(harness: str | None) -> list[str] | None:
+def _native_launch_args(harness: str | None, *, extra_system_prompt: str = "") -> list[str] | None:
     """Terminal launch args for a native-harness job run.
 
     Two concerns, both set at the harness/CLI level rather than as conversation
@@ -293,8 +295,9 @@ def _native_launch_args(harness: str | None) -> list[str] | None:
        - ``codex-native``  → ``--dangerously-bypass-approvals-and-sandbox``
 
     2. **Execution-engine system prompt.** The flow-execution framing
-       (:data:`_EXECUTION_SYSTEM_PROMPT`) is appended to the agent's system
-       prompt via the claude CLI's ``--append-system-prompt``, so it steers the
+       (:data:`_EXECUTION_SYSTEM_PROMPT`) plus any per-step entity backing
+       prompts (``extra_system_prompt``) are appended to the agent's system
+       prompt via the claude CLI's ``--append-system-prompt``, so they steer the
        run without showing up as a user-visible message. (Only wired for
        ``claude-native``; the codex CLI's system-prompt seam differs.)
 
@@ -303,19 +306,98 @@ def _native_launch_args(harness: str | None) -> list[str] | None:
     unknown harness (no terminal args set).
 
     :param harness: The run agent's canonical harness, or ``None``.
+    :param extra_system_prompt: Additional hidden system-prompt text (per-step
+        entity backing prompts) to append after the execution-engine framing.
     :returns: A flat CLI-arg list, or ``None`` when nothing should be set.
     """
     canonical = canonicalize_harness(harness) or harness
     if canonical == CLAUDE_NATIVE_CODING_AGENT.harness:
+        system_prompt = _EXECUTION_SYSTEM_PROMPT
+        if extra_system_prompt:
+            system_prompt = f"{system_prompt}\n\n{extra_system_prompt}"
         return [
             "--permission-mode",
             "bypassPermissions",
             "--append-system-prompt",
-            _EXECUTION_SYSTEM_PROMPT,
+            system_prompt,
         ]
     if canonical == CODEX_NATIVE_CODING_AGENT.harness:
         return ["--dangerously-bypass-approvals-and-sandbox"]
     return None
+
+
+def _collect_backing_prompts(graph_json: str, entity_store: EntityStore | None) -> str:
+    """Build the hidden per-step backing-prompt block for a flow's graph.
+
+    Walks the stored step tree, and for every step that references an entity
+    (``actionId``) whose entity carries a non-empty ``backing_prompt``, emits a
+    line mapping the step's label to that prompt. The result is appended to the
+    run's system prompt (never the conversation), giving the agent per-step
+    implementation guidance — e.g. which MCP/tool to use — without exposing it.
+
+    Built-in entity ids (``ent_builtin_*``) resolve from code; user entity ids
+    resolve from the store. Job-reference ``actionId``s (``job:*``) and unknown
+    ids are skipped. Returns ``""`` when nothing applies.
+
+    :param graph_json: The job's opaque flow-graph JSON (the step tree).
+    :param entity_store: Store for resolving user entities, or ``None``.
+    :returns: A newline-joined block, or ``""`` if no backing prompts apply.
+    """
+    try:
+        root = json.loads(graph_json) if graph_json else None
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(root, dict):
+        return ""
+
+    # Collect (label, actionId) for every entity-backed step, in tree order.
+    steps: list[tuple[str, str]] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        action_id = node.get("actionId")
+        if isinstance(action_id, str) and action_id and not action_id.startswith("job:"):
+            label = node.get("label") if isinstance(node.get("label"), str) else action_id
+            steps.append((label or action_id, action_id))
+        # Continue the walk (next / yes / no branches).
+        for key in ("no", "yes", "next"):
+            child = node.get(key)
+            if isinstance(child, dict):
+                stack.append(child)
+
+    if not steps:
+        return ""
+
+    def _backing_for(action_id: str) -> str:
+        builtin = get_builtin_entity(action_id)
+        if builtin is not None:
+            return builtin.backing_prompt or ""
+        if entity_store is not None:
+            try:
+                entity = entity_store.get_entity(action_id)
+            except Exception:  # noqa: BLE001 - resolution is best-effort
+                return ""
+            if entity is not None:
+                return entity.backing_prompt or ""
+        return ""
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for label, action_id in steps:
+        if action_id in seen:
+            continue
+        seen.add(action_id)
+        backing = _backing_for(action_id)
+        if backing:
+            lines.append(f'- For the step "{label}": {backing}')
+    if not lines:
+        return ""
+    return (
+        "Step implementation guidance (internal — do not repeat to the user). "
+        "When you execute the following steps, follow this guidance:\n" + "\n".join(lines)
+    )
 
 
 async def _execute_job_run(
@@ -333,6 +415,7 @@ async def _execute_job_run(
     file_store: FileStore | None,
     artifact_store: ArtifactStore | None,
     default_run_agent_id: str | None,
+    entity_store: EntityStore | None = None,
     trigger: str = RUN_TRIGGER_ADHOC,
 ) -> Run:
     """Run a job: create a session, bind a runner, dispatch the narrative.
@@ -402,7 +485,10 @@ async def _execute_job_run(
         except Exception:  # noqa: BLE001 - spec load is best-effort for approval mode
             _logger.warning("job-run harness resolve failed for agent %s", agent_id, exc_info=True)
             harness = None
-    terminal_launch_args = _native_launch_args(harness)
+    # Per-step entity backing prompts → hidden system-prompt block (never shown
+    # in the conversation), appended to the execution-engine framing.
+    backing_prompts = _collect_backing_prompts(job.graph, entity_store)
+    terminal_launch_args = _native_launch_args(harness, extra_system_prompt=backing_prompts)
 
     # Create the session WITHOUT initial items — we dispatch the narrative as a
     # real event below so it executes.
@@ -530,6 +616,7 @@ def create_jobs_router(
     artifact_store: ArtifactStore | None = None,
     liveness_lookup: Callable[[list[str]], dict[str, SessionLiveness]] | None = None,
     default_run_agent_id: str | None = None,
+    entity_store: EntityStore | None = None,
 ) -> APIRouter:
     """Build the jobs router.
 
@@ -652,6 +739,7 @@ def create_jobs_router(
             file_store=file_store,
             artifact_store=artifact_store,
             default_run_agent_id=default_run_agent_id,
+            entity_store=entity_store,
         )
         return _run_to_response(run)
 

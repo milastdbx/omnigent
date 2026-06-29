@@ -27,6 +27,8 @@ export interface Entity {
   title: string;
   /** Text folded into the flow narrative when this entity is used as a step. */
   instruction: string;
+  /** Hidden run-time prompt injected into the agent; never shown to the user. */
+  backingPrompt: string;
   /** Owning group id, or null if ungrouped. */
   groupId: string | null;
   /** Whether this is a read-only code-owned built-in (e.g. a Jira action). */
@@ -52,6 +54,7 @@ function fromApi(e: ApiEntity): Entity {
     id: e.id,
     title: e.title,
     instruction: e.instruction,
+    backingPrompt: e.backingPrompt,
     groupId: e.groupId,
     isBuiltin: e.isBuiltin,
     createdAt: e.createdAt,
@@ -92,20 +95,31 @@ export async function createEntity(
   title: string,
   instruction: string,
   groupId?: string | null,
+  backingPrompt?: string,
 ): Promise<Entity> {
   const e = put(
     fromApi(
-      await apiCreateEntity({ title: title.trim() || "Untitled", instruction, groupId }),
+      await apiCreateEntity({
+        title: title.trim() || "Untitled",
+        instruction,
+        groupId,
+        backingPrompt,
+      }),
     ),
   );
   emit();
   return e;
 }
 
-/** Patch title, instruction, and/or group (groupId: null clears the group). */
+/** Patch title, instruction, backing prompt, and/or group (groupId: null clears the group). */
 export async function updateEntity(
   id: string,
-  patch: { title?: string; instruction?: string; groupId?: string | null },
+  patch: {
+    title?: string;
+    instruction?: string;
+    backingPrompt?: string;
+    groupId?: string | null;
+  },
 ): Promise<void> {
   const e = fromApi(await apiUpdateEntity(id, patch));
   put(e);
