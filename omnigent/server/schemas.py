@@ -3800,6 +3800,7 @@ class EntityCreateRequest(BaseModel):
 
     title: str = Field(min_length=1, max_length=256)
     instruction: str = ""
+    backing_prompt: str = ""
     group_id: str | None = None
 
     model_config = ConfigDict(extra="forbid")
@@ -3812,12 +3813,15 @@ class EntityUpdateRequest(BaseModel):
 
     :param title: New entity title.
     :param instruction: New instruction text.
+    :param backing_prompt: New hidden run-time prompt. ``None`` leaves it
+        unchanged.
     :param group_id: New owning group id; the empty string moves the entity to
         ungrouped. ``None`` leaves it unchanged.
     """
 
     title: str | None = Field(default=None, min_length=1, max_length=256)
     instruction: str | None = None
+    backing_prompt: str | None = None
     group_id: str | None = None
 
     model_config = ConfigDict(extra="forbid")
@@ -3831,6 +3835,8 @@ class EntityResponse(BaseModel):
     :param object: Always ``"entity"``.
     :param title: Human-readable title.
     :param instruction: Instruction text folded into a flow when used.
+    :param backing_prompt: Hidden run-time prompt injected into the agent's
+        system prompt when used; never shown in the conversation.
     :param group_id: Owning group id, or ``None`` if ungrouped.
     :param is_builtin: Whether this is a read-only code-owned built-in.
     :param created_at: Unix epoch seconds of creation.
@@ -3841,6 +3847,7 @@ class EntityResponse(BaseModel):
     object: str = "entity"
     title: str
     instruction: str
+    backing_prompt: str = ""
     group_id: str | None = None
     is_builtin: bool = False
     created_at: int

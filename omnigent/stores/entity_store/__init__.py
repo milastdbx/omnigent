@@ -34,6 +34,7 @@ class EntityStore(ABC):
         *,
         title: str,
         instruction: str,
+        backing_prompt: str = "",
         created_by: str | None = None,
         group_id: str | None = None,
     ) -> Entity:
@@ -42,6 +43,8 @@ class EntityStore(ABC):
 
         :param title: Human-readable title.
         :param instruction: Instruction text folded into a flow when used.
+        :param backing_prompt: Hidden run-time prompt injected into the agent's
+            system prompt when used; never shown in the conversation.
         :param created_by: Owning user id, or ``None`` in single-user mode.
         :param group_id: Owning entity group, or ``None`` if ungrouped.
         :returns: The newly created :class:`Entity`.
@@ -76,6 +79,7 @@ class EntityStore(ABC):
         *,
         title: str | None = None,
         instruction: str | None = None,
+        backing_prompt: str | None = None,
         group_id: str | None = None,
     ) -> Entity | None:
         """
@@ -84,6 +88,8 @@ class EntityStore(ABC):
         id is unknown.
 
         :param entity_id: Unique entity identifier, e.g. ``"ent_abc123"``.
+        :param backing_prompt: New hidden run-time prompt. ``None`` leaves it
+            unchanged.
         :param group_id: New owning group id. ``None`` leaves it unchanged;
             pass the empty string to clear it (move to ungrouped).
         :returns: The updated :class:`Entity`, or ``None`` if not found.

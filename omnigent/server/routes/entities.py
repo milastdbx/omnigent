@@ -45,6 +45,7 @@ def _entity_to_response(entity: Entity, *, is_builtin: bool = False) -> EntityRe
         id=entity.id,
         title=entity.title,
         instruction=entity.instruction,
+        backing_prompt=entity.backing_prompt,
         group_id=entity.group_id,
         is_builtin=is_builtin,
         created_at=entity.created_at,
@@ -102,6 +103,7 @@ def create_entities_router(
             entity_store.create_entity,
             title=body.title,
             instruction=body.instruction,
+            backing_prompt=body.backing_prompt,
             created_by=attribution_user(user_id),
             group_id=body.group_id,
         )
@@ -139,6 +141,7 @@ def create_entities_router(
             entity_id,
             title=body.title,
             instruction=body.instruction,
+            backing_prompt=body.backing_prompt,
             group_id=body.group_id,
         )
         if updated is None:

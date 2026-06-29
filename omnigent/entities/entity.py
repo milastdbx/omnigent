@@ -25,6 +25,11 @@ class Entity:
     :param title: Human-readable title shown on the flow step.
     :param instruction: The instruction text folded into a flow's narrative
         when this entity is used as a step.
+    :param backing_prompt: A hidden, run-time-only prompt injected into the
+        agent's system prompt when a flow step uses this entity. Unlike
+        ``instruction`` (user-visible in the narrative), this is never shown in
+        the conversation — it carries implementation guidance like which MCP /
+        tool to use. Defaults to an empty string.
     :param created_by: Owning user id, or ``None`` in single-user mode.
     :param group_id: The :class:`~omnigent.entities.entity_group.EntityGroup`
         this entity belongs to, or ``None`` if ungrouped. Built-in entities
@@ -36,5 +41,6 @@ class Entity:
     updated_at: int
     title: str
     instruction: str
+    backing_prompt: str = ""
     created_by: str | None = None
     group_id: str | None = None

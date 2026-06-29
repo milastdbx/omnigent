@@ -40,6 +40,7 @@ class SqlAlchemyEntityStore(EntityStore):
         *,
         title: str,
         instruction: str,
+        backing_prompt: str = "",
         created_by: str | None = None,
         group_id: str | None = None,
     ) -> Entity:
@@ -51,6 +52,7 @@ class SqlAlchemyEntityStore(EntityStore):
             updated_at=ts,
             title=title,
             instruction=instruction,
+            backing_prompt=backing_prompt,
             created_by=created_by,
             group_id=group_id,
         )
@@ -81,6 +83,7 @@ class SqlAlchemyEntityStore(EntityStore):
         *,
         title: str | None = None,
         instruction: str | None = None,
+        backing_prompt: str | None = None,
         group_id: str | None = None,
     ) -> Entity | None:
         """Patch an entity and bump ``updated_at``. See :meth:`EntityStore.update_entity`."""
@@ -92,6 +95,8 @@ class SqlAlchemyEntityStore(EntityStore):
                 row.title = title
             if instruction is not None:
                 row.instruction = instruction
+            if backing_prompt is not None:
+                row.backing_prompt = backing_prompt
             # Empty string clears the group (ungrouped); None leaves it unchanged.
             if group_id is not None:
                 row.group_id = group_id or None
