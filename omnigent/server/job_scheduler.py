@@ -44,6 +44,7 @@ from omnigent.server.routes.sessions import SessionLiveness
 from omnigent.stores.agent_store import AgentStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.conversation_store import ConversationStore
+from omnigent.stores.entity_store import EntityStore
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.job_store import JobStore
 from omnigent.stores.permission_store import PermissionStore
@@ -135,6 +136,7 @@ async def _maybe_run_job(
     artifact_store: ArtifactStore | None,
     liveness_lookup: Callable[[list[str]], dict[str, SessionLiveness]] | None,
     default_run_agent_id: str | None,
+    entity_store: EntityStore | None = None,
 ) -> bool:
     """Spawn a scheduled run for ``job`` if it is enabled, due, and not overlapping.
 
@@ -180,6 +182,7 @@ async def _maybe_run_job(
         file_store=file_store,
         artifact_store=artifact_store,
         default_run_agent_id=default_run_agent_id,
+        entity_store=entity_store,
         trigger=RUN_TRIGGER_SCHEDULED,
     )
     _logger.info("job scheduler: spawned scheduled run for job %s", job.id)
@@ -199,6 +202,7 @@ async def _run_scheduler_tick(
     artifact_store: ArtifactStore | None,
     liveness_lookup: Callable[[list[str]], dict[str, SessionLiveness]] | None,
     default_run_agent_id: str | None,
+    entity_store: EntityStore | None = None,
 ) -> int:
     """Run one scheduler pass: spawn a run for each due, enabled, non-overlapping job.
 
@@ -235,6 +239,7 @@ async def _run_scheduler_tick(
                 artifact_store=artifact_store,
                 liveness_lookup=liveness_lookup,
                 default_run_agent_id=default_run_agent_id,
+                entity_store=entity_store,
             ):
                 spawned += 1
         except Exception:
@@ -256,6 +261,7 @@ async def run_job_scheduler_periodically(
     artifact_store: ArtifactStore | None,
     liveness_lookup: Callable[[list[str]], dict[str, SessionLiveness]] | None,
     default_run_agent_id: str | None,
+    entity_store: EntityStore | None = None,
     interval_seconds: float = 60.0,
 ) -> None:
     """Poll for due scheduled jobs every ``interval_seconds`` until cancelled.
@@ -283,6 +289,7 @@ async def run_job_scheduler_periodically(
                 artifact_store=artifact_store,
                 liveness_lookup=liveness_lookup,
                 default_run_agent_id=default_run_agent_id,
+                entity_store=entity_store,
             )
         except Exception:
             # Keep the scheduler alive across ticks; retry on the next poll.

@@ -19,6 +19,8 @@ export interface ApiEntity {
   id: string;
   title: string;
   instruction: string;
+  /** Hidden run-time prompt injected into the agent; never shown in chat. */
+  backingPrompt: string;
   /** Owning group id, or null if ungrouped. */
   groupId: string | null;
   /** Whether this is a read-only code-owned built-in. */
@@ -32,6 +34,7 @@ interface EntityWire {
   id: string;
   title: string;
   instruction: string;
+  backing_prompt?: string;
   group_id: string | null;
   is_builtin: boolean;
   created_at: number;
@@ -43,6 +46,7 @@ function entityFromWire(w: EntityWire): ApiEntity {
     id: w.id,
     title: w.title,
     instruction: w.instruction ?? "",
+    backingPrompt: w.backing_prompt ?? "",
     groupId: w.group_id ?? null,
     isBuiltin: !!w.is_builtin,
     createdAt: w.created_at * 1000,
@@ -70,6 +74,8 @@ async function readJsonOrThrow<T>(res: Response): Promise<T> {
 export interface EntityInput {
   title?: string;
   instruction?: string;
+  /** Hidden run-time prompt; undefined leaves unchanged. */
+  backingPrompt?: string;
   /** Group id to assign; "" moves to ungrouped; undefined leaves unchanged. */
   groupId?: string | null;
 }
@@ -78,6 +84,7 @@ function toBody(input: EntityInput): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   if (input.title !== undefined) body.title = input.title;
   if (input.instruction !== undefined) body.instruction = input.instruction;
+  if (input.backingPrompt !== undefined) body.backing_prompt = input.backingPrompt;
   // Map null -> "" so the backend clears the group; a real id passes through.
   if (input.groupId !== undefined) body.group_id = input.groupId ?? "";
   return body;

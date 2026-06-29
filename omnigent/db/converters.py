@@ -81,6 +81,7 @@ def sql_entity_to_entity(row: SqlEntity) -> Entity:
         updated_at=row.updated_at,
         title=row.title,
         instruction=row.instruction,
+        backing_prompt=row.backing_prompt,
         created_by=row.created_by,
         group_id=row.group_id,
     )

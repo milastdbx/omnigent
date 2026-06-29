@@ -1252,6 +1252,7 @@ def create_app(
                     artifact_store=artifact_store,
                     liveness_lookup=_bulk_session_liveness,
                     default_run_agent_id=None,
+                    entity_store=entity_store,
                 )
             )
         try:
@@ -1842,6 +1843,7 @@ def create_app(
                 file_store=file_store,
                 artifact_store=artifact_store,
                 liveness_lookup=_bulk_session_liveness,
+                entity_store=entity_store,
             ),
             prefix="/v1",
             tags=["jobs"],

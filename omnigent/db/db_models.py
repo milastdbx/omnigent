@@ -922,6 +922,9 @@ class SqlEntity(Base):
     updated_at: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(256))
     instruction: Mapped[str] = mapped_column(Text)
+    # Hidden, run-time-only prompt: injected into the agent's system prompt when
+    # a flow step uses this entity, never shown in the conversation/narrative.
+    backing_prompt: Mapped[str] = mapped_column(Text, default="")
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     group_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
