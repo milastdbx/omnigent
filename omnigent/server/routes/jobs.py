@@ -43,6 +43,7 @@ from omnigent.native_coding_agents import (
     CODEX_NATIVE_CODING_AGENT,
 )
 from omnigent.runner.routing import RunnerRouter
+from omnigent.runtime import session_stream
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import AUTO_APPROVE_LABEL
 from omnigent.server.auth import LEVEL_OWNER, AuthProvider
@@ -76,6 +77,10 @@ from omnigent.stores.job_store import JobStore
 from omnigent.stores.permission_store import PermissionStore
 
 _logger = logging.getLogger(__name__)
+
+# Strong refs to in-flight run-progress tracker tasks so they aren't garbage
+# collected mid-flight; each removes itself via a done callback.
+_RUN_PROGRESS_TASKS: set[asyncio.Task[None]] = set()
 
 # System prompt for a job run. Injected at the harness level via the claude
 # CLI's ``--append-system-prompt`` (see ``_native_launch_args``), so it steers
@@ -136,6 +141,7 @@ def _run_to_response(run: Run) -> RunResponse:
         started_at=run.started_at,
         completed_at=run.completed_at,
         error=run.error,
+        progress=run.progress,
         trigger=run.trigger,
     )
 
@@ -400,6 +406,88 @@ def _collect_backing_prompts(graph_json: str, entity_store: EntityStore | None) 
     )
 
 
+# Turn-terminal event types that end progress tracking for a run.
+_PROGRESS_TERMINAL_TYPES = frozenset(
+    {"response.completed", "response.failed", "response.cancelled"}
+)
+# session.status values that mean no turn is active (catches Stop / cancel /
+# setup-failure paths that end without a terminal response.* event).
+_PROGRESS_IDLE_STATUSES = frozenset({"idle", "failed"})
+# Cap stored progress text so a long turn can't bloat the run row.
+_PROGRESS_MAX_CHARS = 600
+
+
+def _progress_preview(text: str) -> str:
+    """Condense streamed text to a short, single-ish-line progress string."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) > _PROGRESS_MAX_CHARS:
+        collapsed = collapsed[: _PROGRESS_MAX_CHARS - 1].rstrip() + "…"
+    return collapsed
+
+
+async def _track_run_progress(
+    *,
+    session_id: str,
+    run_id: str,
+    job_store: JobStore,
+) -> None:
+    """Capture a run's live step text into its ``progress`` field.
+
+    A background subscriber to the run's session stream (the same event feed the
+    web UI taps). It accumulates ``response.output_text.delta`` text and writes
+    the latest preview to the run row, so the jobs "Status" affordance shows the
+    current step even for an *unattended* background run — whose stream otherwise
+    has no subscriber and is therefore never captured. Ends on the turn's
+    terminal event (or an idle/failed ``session.status``).
+
+    Must be started BEFORE the narrative is dispatched: the stream is live-tail
+    only (no replay), so a later subscribe would miss the turn's early deltas.
+    Best-effort throughout — any failure just means no live progress, never a
+    failed run.
+
+    :param session_id: The run's session/conversation id.
+    :param run_id: The run row to update.
+    :param job_store: Store used to persist progress.
+    """
+    text_parts: list[str] = []
+    last_written = ""
+
+    async def _flush() -> None:
+        nonlocal last_written
+        preview = _progress_preview("".join(text_parts))
+        if preview and preview != last_written:
+            last_written = preview
+            try:
+                await asyncio.to_thread(
+                    job_store.update_run_progress, run_id, progress=preview
+                )
+            except Exception:  # noqa: BLE001 - progress is best-effort
+                _logger.debug("run-progress write failed for %s", run_id, exc_info=True)
+
+    try:
+        async for event in session_stream.subscribe(session_id, heartbeat_interval_s=15.0):
+            etype = event.get("type")
+            if etype == "response.output_text.delta":
+                delta = event.get("delta")
+                if isinstance(delta, str) and delta:
+                    text_parts.append(delta)
+                    # Throttle writes to roughly once per delta batch via the
+                    # dedupe in _flush (only writes when the preview changed).
+                    await _flush()
+            elif etype in _PROGRESS_TERMINAL_TYPES:
+                await _flush()
+                break
+            elif etype == "session.status":
+                status = event.get("status")
+                if isinstance(status, str) and status in _PROGRESS_IDLE_STATUSES:
+                    await _flush()
+                    break
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - tracking must never break a run
+        _logger.debug("run-progress tracking errored for %s", run_id, exc_info=True)
+
+
 async def _execute_job_run(
     job: Job,
     request: Request,
@@ -558,9 +646,34 @@ async def _execute_job_run(
         type="message",
         data={"role": "user", "content": [{"type": "input_text", "text": job.narrative}]},
     )
+    # Create the run row up front so the progress tracker (below) has a run id
+    # to write to, and so it exists the moment the run is observable.
+    run = await asyncio.to_thread(
+        job_store.create_run,
+        job_id=job.id,
+        session_id=session.id,
+        status=RUN_STATUS_RUNNING,
+        created_by=attribution_user(user_id),
+        trigger=trigger,
+    )
+
     runner_client = await _get_runner_client(session.id, runner_router)
     conv = await asyncio.to_thread(conversation_store.get_conversation, session.id)
     if runner_client is not None and conv is not None:
+        # Capture the run's step text into its ``progress`` field. Started
+        # BEFORE forwarding — the stream is live-tail only, so subscribing after
+        # dispatch would miss the turn's early deltas. Fire-and-forget: the task
+        # ends itself on the turn's terminal event. Detached from the request so
+        # it outlives the HTTP response (the run executes in the background).
+        progress_task = asyncio.create_task(
+            _track_run_progress(
+                session_id=session.id, run_id=run.id, job_store=job_store
+            )
+        )
+        # Hold a reference so the task isn't GC'd mid-flight; it self-completes.
+        _RUN_PROGRESS_TASKS.add(progress_task)
+        progress_task.add_done_callback(_RUN_PROGRESS_TASKS.discard)
+
         # Subscribe to runner output BEFORE forwarding (the stream has no
         # replay buffer), then dispatch the user message.
         await _ensure_runner_relay_ready(session.id, runner_id, runner_client, conversation_store)
@@ -594,14 +707,7 @@ async def _execute_job_run(
             ],
         )
 
-    return await asyncio.to_thread(
-        job_store.create_run,
-        job_id=job.id,
-        session_id=session.id,
-        status=RUN_STATUS_RUNNING,
-        created_by=attribution_user(user_id),
-        trigger=trigger,
-    )
+    return run
 
 
 def create_jobs_router(

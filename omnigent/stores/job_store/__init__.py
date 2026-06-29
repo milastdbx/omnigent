@@ -209,3 +209,15 @@ class JobStore(ABC):
         :returns: The updated :class:`Run`, or ``None`` if not found.
         """
         ...
+
+    @abstractmethod
+    def update_run_progress(self, run_id: str, *, progress: str) -> Run | None:
+        """
+        Update a run's latest progress text. Returns the updated run, or
+        ``None`` if the id is unknown.
+
+        :param run_id: Unique run identifier, e.g. ``"run_abc123"``.
+        :param progress: Latest step/progress text captured from the stream.
+        :returns: The updated :class:`Run`, or ``None`` if not found.
+        """
+        ...

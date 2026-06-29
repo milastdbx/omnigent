@@ -48,6 +48,7 @@ function apiRun(overrides: Partial<api.Run> = {}): api.Run {
     startedAt: 1000,
     completedAt: null,
     error: null,
+    progress: "",
     trigger: "adhoc",
     ...overrides,
   };

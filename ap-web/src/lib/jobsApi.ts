@@ -53,6 +53,8 @@ export interface Run {
   startedAt: number;
   completedAt: number | null;
   error: string | null;
+  /** Latest step/progress text captured from the run's stream; "" if none. */
+  progress: string;
   /** How the run was triggered: manual "Run now" vs the time scheduler. */
   trigger: "adhoc" | "scheduled";
 }
@@ -83,6 +85,7 @@ interface RunWire {
   started_at: number;
   completed_at: number | null;
   error: string | null;
+  progress?: string;
   trigger: "adhoc" | "scheduled";
 }
 
@@ -114,6 +117,7 @@ function runFromWire(w: RunWire): Run {
     startedAt: w.started_at * 1000,
     completedAt: w.completed_at == null ? null : w.completed_at * 1000,
     error: w.error,
+    progress: w.progress ?? "",
     trigger: w.trigger ?? "adhoc",
   };
 }

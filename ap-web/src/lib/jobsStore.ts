@@ -52,6 +52,8 @@ export interface Run {
   logs: string[];
   /** The agent session this run created, for deep-linking. */
   sessionId?: string;
+  /** Latest step/progress text captured from the run's stream; "" if none. */
+  progress: string;
   /** How the run was triggered: manual "Run now" vs the time scheduler. */
   trigger: "adhoc" | "scheduled";
 }
@@ -118,6 +120,7 @@ function runFromApi(r: ApiRun, number: number): Run {
     finishedAt: r.completedAt ?? undefined,
     logs,
     sessionId: r.sessionId ?? undefined,
+    progress: r.progress ?? "",
     trigger: r.trigger,
   };
 }

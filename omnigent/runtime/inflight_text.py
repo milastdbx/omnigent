@@ -758,6 +758,34 @@ def snapshot_for(conversation_id: str) -> list[dict[str, Any]]:
         return events
 
 
+def latest_text_for(conversation_id: str) -> str:
+    """
+    Return the conversation's in-flight assistant text streamed so far.
+
+    A lightweight, non-SSE read of the same buffer :func:`snapshot_for`
+    replays — used by the jobs "Status" affordance to show where a native run's
+    flow execution currently is, since native turns aren't persisted as
+    conversation items mid-turn. Returns the latest in-flight message's text for
+    claude-native (message-scoped) streaming, the accumulated turn text
+    otherwise, or ``""`` when nothing is in flight.
+
+    :param conversation_id: Conversation/session id to query.
+    :returns: The streamed-so-far text, or ``""`` when there is none.
+    """
+    with _lock:
+        native_messages = _native_inflight.get(conversation_id)
+        if native_messages:
+            # The most recently added in-flight message carries the live tail.
+            for message in reversed(list(native_messages.values())):
+                text = "".join(message.parts)
+                if text:
+                    return text
+        entry = _inflight.get(conversation_id)
+        if entry is not None:
+            return "".join(entry.parts)
+        return ""
+
+
 def discard(conversation_id: str) -> None:
     """
     Drop a conversation's in-flight entry, if any.
