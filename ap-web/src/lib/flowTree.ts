@@ -53,6 +53,8 @@ export type Slot = "next" | "yes" | "no";
 
 /** Types offerable when adding a step (Start only ever exists as the root). */
 export const ADDABLE_TYPES: FlowNodeType[] = ["process", "decision", "end"];
+/** Types that can be inserted before an existing step without dropping it. */
+export const INSERTABLE_TYPES: FlowNodeType[] = ["process", "decision"];
 
 export function defaultLabel(type: FlowNodeType): string {
   switch (type) {
@@ -151,6 +153,23 @@ export function attach(root: FlowStep, parentId: string, slot: Slot, type: FlowN
   });
 }
 
+function insertBeforeChild(parent: FlowStep, slot: Slot, inserted: FlowStep): FlowStep {
+  const child = parent[slot];
+  if (!child) return parent;
+  if (inserted.type === "decision") {
+    return { ...parent, [slot]: { ...inserted, yes: child } };
+  }
+  return { ...parent, [slot]: { ...inserted, next: child } };
+}
+
+/** Insert a new generic step between ``parentId`` and its existing ``slot`` child. */
+export function insert(root: FlowStep, parentId: string, slot: Slot, type: FlowNodeType): FlowStep {
+  return mapTree(root, (s) => {
+    if (s.id !== parentId || !s[slot]) return s;
+    return insertBeforeChild(s, slot, newStep(type));
+  });
+}
+
 /** Attach a predefined catalog action to `parentId`'s `slot`. No-op if taken. */
 export function attachAction(
   root: FlowStep,
@@ -164,6 +183,22 @@ export function attachAction(
   return mapTree(root, (s) => {
     if (s.id !== parentId || s[slot]) return s;
     return { ...s, [slot]: newActionStep(actionId, label, group, instruction) };
+  });
+}
+
+/** Insert a predefined action between ``parentId`` and its existing ``slot`` child. */
+export function insertAction(
+  root: FlowStep,
+  parentId: string,
+  slot: Slot,
+  actionId: string,
+  label: string,
+  group: string,
+  instruction?: string,
+): FlowStep {
+  return mapTree(root, (s) => {
+    if (s.id !== parentId || !s[slot]) return s;
+    return insertBeforeChild(s, slot, newActionStep(actionId, label, group, instruction));
   });
 }
 

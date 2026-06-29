@@ -35,12 +35,15 @@ import { Link, useNavigate, useParams } from "@/lib/routing";
 import type { FlowNodeType } from "@/lib/flowToText";
 import {
   ADDABLE_TYPES,
+  INSERTABLE_TYPES,
   attach,
   attachAction,
   repairActionSteps,
   countSteps,
   defaultLabel,
   deleteStep,
+  insert,
+  insertAction,
   LAUNCH_SUB_AGENT_ACTION_ID,
   newStep,
   setBranchLabel,
@@ -114,11 +117,13 @@ function AddStep({
   onPickAction,
   groups,
   loadingGroups,
+  addableTypes = ADDABLE_TYPES,
 }: {
   onPick: (type: FlowNodeType) => void;
   onPickAction: (action: ActionDef, group: ActionGroup) => void;
   groups: ActionGroup[];
   loadingGroups: boolean;
+  addableTypes?: FlowNodeType[];
 }) {
   const [open, setOpen] = useState(false);
   if (!open) {
@@ -137,7 +142,7 @@ function AddStep({
     <div className="flex w-60 flex-col gap-1 rounded-lg border border-border bg-card p-1.5 shadow-md">
       {/* Generic node types */}
       <div className="flex flex-wrap gap-1">
-        {ADDABLE_TYPES.map((type) => (
+        {addableTypes.map((type) => (
           <Button
             key={type}
             variant="ghost"
@@ -200,6 +205,8 @@ interface StepViewProps {
   isRoot: boolean;
   onAdd: (parentId: string, slot: Slot, type: FlowNodeType) => void;
   onAddAction: (parentId: string, slot: Slot, action: ActionDef, group: ActionGroup) => void;
+  onInsert: (parentId: string, slot: Slot, type: FlowNodeType) => void;
+  onInsertAction: (parentId: string, slot: Slot, action: ActionDef, group: ActionGroup) => void;
   onRename: (id: string, label: string) => void;
   onInstructionChange: (id: string, instruction: string) => void;
   onRenameBranch: (id: string, branch: "yes" | "no", label: string) => void;
@@ -210,6 +217,33 @@ interface StepViewProps {
 
 function Connector() {
   return <div className="h-6 w-0.5 bg-muted-foreground/60" />;
+}
+
+function InsertConnector({
+  onPick,
+  onPickAction,
+  groups,
+  loadingGroups,
+}: {
+  onPick: (type: FlowNodeType) => void;
+  onPickAction: (action: ActionDef, group: ActionGroup) => void;
+  groups: ActionGroup[];
+  loadingGroups: boolean;
+}) {
+  return (
+    <div className="group/edge relative flex h-6 w-12 items-center justify-center">
+      <div className="h-full w-0.5 bg-muted-foreground/60" />
+      <div className="absolute top-1/2 left-1/2 z-20 -translate-x-1/2 -translate-y-1/2 opacity-0 transition-opacity group-hover/edge:opacity-100 group-focus-within/edge:opacity-100">
+        <AddStep
+          addableTypes={INSERTABLE_TYPES}
+          groups={groups}
+          loadingGroups={loadingGroups}
+          onPick={onPick}
+          onPickAction={onPickAction}
+        />
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -294,6 +328,8 @@ function StepView({
   isRoot,
   onAdd,
   onAddAction,
+  onInsert,
+  onInsertAction,
   onRename,
   onInstructionChange,
   onRenameBranch,
@@ -306,6 +342,8 @@ function StepView({
   const childProps = {
     onAdd,
     onAddAction,
+    onInsert,
+    onInsertAction,
     onRename,
     onInstructionChange,
     onRenameBranch,
@@ -323,12 +361,29 @@ function StepView({
   const isFixedSourceStep =
     step.actionId?.startsWith("job:") ||
     (step.actionId?.startsWith("ent_builtin_") && !isLaunchSubAgentStep);
+  const subAgentTask = step.instruction ?? "";
+  const subAgentTaskRows = Math.min(
+    12,
+    Math.max(
+      3,
+      subAgentTask
+        .split("\n")
+        .reduce((rows, line) => rows + Math.max(1, Math.ceil(line.length / 52)), 0),
+    ),
+  );
   return (
     <div className="flex flex-col items-center">
       {/* The box. `relative z-10` lifts it above the branch-connector
           pseudo-elements (which sit at the lane's top-0) so its label input and
           delete button always receive clicks. */}
-      <div className="group relative z-10 flex min-w-[180px] max-w-[280px] items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2.5 text-left shadow-sm">
+      <div
+        className={cn(
+          "group relative z-10 flex gap-2.5 rounded-lg border border-border bg-card px-3 py-2.5 text-left shadow-sm",
+          isLaunchSubAgentStep
+            ? "min-w-[360px] max-w-[560px] items-start"
+            : "min-w-[180px] max-w-[280px] items-center",
+        )}
+      >
         {/* Left: the action's group icon, or a node-type accent dot for generic
             steps — so the box reads as "what kind of step" at a glance. */}
         {stepGroup?.icon ? (
@@ -359,13 +414,13 @@ function StepView({
           {isLaunchSubAgentStep ? (
             <textarea
               aria-label="Sub-agent task"
-              value={step.instruction ?? ""}
+              value={subAgentTask}
               placeholder="Describe what the sub-agent should do…"
-              rows={3}
+              rows={subAgentTaskRows}
               onChange={(e) => onInstructionChange(step.id, e.target.value)}
               onClick={(e) => e.stopPropagation()}
               onMouseDown={(e) => e.stopPropagation()}
-              className="mt-2 w-full resize-y rounded-md border border-input bg-background px-2 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="mt-2 w-full resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1 text-xs leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
           ) : null}
         </div>
@@ -424,16 +479,30 @@ function StepView({
                       inputClassName="text-[11px] w-16"
                     />
                   </div>
-                  <Connector />
                   {child ? (
-                    <StepView step={child} isRoot={false} {...childProps} />
+                    <>
+                      <InsertConnector
+                        groups={groups}
+                        loadingGroups={loadingGroups}
+                        onPick={(type) => onInsert(step.id, branch, type)}
+                        onPickAction={(action, group) =>
+                          onInsertAction(step.id, branch, action, group)
+                        }
+                      />
+                      <StepView step={child} isRoot={false} {...childProps} />
+                    </>
                   ) : (
-                    <AddStep
-                      groups={groups}
-                      loadingGroups={loadingGroups}
-                      onPick={(type) => onAdd(step.id, branch, type)}
-                      onPickAction={(action, group) => onAddAction(step.id, branch, action, group)}
-                    />
+                    <>
+                      <Connector />
+                      <AddStep
+                        groups={groups}
+                        loadingGroups={loadingGroups}
+                        onPick={(type) => onAdd(step.id, branch, type)}
+                        onPickAction={(action, group) =>
+                          onAddAction(step.id, branch, action, group)
+                        }
+                      />
+                    </>
                   )}
                 </div>
               );
@@ -443,16 +512,26 @@ function StepView({
       ) : step.type === "end" ? null : (
         // Linear: next step or an open "+"
         <>
-          <Connector />
           {step.next ? (
-            <StepView step={step.next} isRoot={false} {...childProps} />
+            <>
+              <InsertConnector
+                groups={groups}
+                loadingGroups={loadingGroups}
+                onPick={(type) => onInsert(step.id, "next", type)}
+                onPickAction={(action, group) => onInsertAction(step.id, "next", action, group)}
+              />
+              <StepView step={step.next} isRoot={false} {...childProps} />
+            </>
           ) : (
-            <AddStep
-              groups={groups}
-              loadingGroups={loadingGroups}
-              onPick={(type) => onAdd(step.id, "next", type)}
-              onPickAction={(action, group) => onAddAction(step.id, "next", action, group)}
-            />
+            <>
+              <Connector />
+              <AddStep
+                groups={groups}
+                loadingGroups={loadingGroups}
+                onPick={(type) => onAdd(step.id, "next", type)}
+                onPickAction={(action, group) => onAddAction(step.id, "next", action, group)}
+              />
+            </>
           )}
         </>
       )}
@@ -585,6 +664,26 @@ export function FlowchartPage() {
       // full instruction is stored separately for when the flow actually runs.
       setTree((t) =>
         attachAction(
+          t,
+          parentId,
+          slot,
+          action.id,
+          action.label,
+          group.name,
+          action.id === LAUNCH_SUB_AGENT_ACTION_ID ? "" : action.instruction,
+        ),
+      ),
+    [],
+  );
+  const onInsert = useCallback(
+    (parentId: string, slot: Slot, type: FlowNodeType) =>
+      setTree((t) => insert(t, parentId, slot, type)),
+    [],
+  );
+  const onInsertAction = useCallback(
+    (parentId: string, slot: Slot, action: ActionDef, group: ActionGroup) =>
+      setTree((t) =>
+        insertAction(
           t,
           parentId,
           slot,
@@ -784,6 +883,8 @@ export function FlowchartPage() {
               isRoot
               onAdd={onAdd}
               onAddAction={onAddAction}
+              onInsert={onInsert}
+              onInsertAction={onInsertAction}
               onRename={onRename}
               onInstructionChange={onInstructionChange}
               onRenameBranch={onRenameBranch}
