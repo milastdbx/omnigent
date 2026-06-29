@@ -76,7 +76,7 @@ from omnigent.stores.permission_store import PermissionStore
 _logger = logging.getLogger(__name__)
 
 # System prompt for a job run. Injected at the harness level via the claude
-# CLI's ``--append-system-prompt`` (see ``_native_launch_args``), so it steers
+# CLI's ``--append-system-prompt`` (see ``_auto_approve_launch_args``), so it steers
 # the agent without appearing as a user-visible message.
 _EXECUTION_SYSTEM_PROMPT = (
     "You are an execution engine for a flow chart. You should execute each step "
@@ -278,7 +278,7 @@ async def _resolve_host_home(host_registry: object, host_conn: object) -> str | 
     return first_path[:slash] if slash > 0 else "/"
 
 
-def _native_launch_args(harness: str | None) -> list[str] | None:
+def _auto_approve_launch_args(harness: str | None) -> list[str] | None:
     """Terminal launch args for a native-harness job run.
 
     Two concerns, both set at the harness/CLI level rather than as conversation
@@ -286,10 +286,10 @@ def _native_launch_args(harness: str | None) -> list[str] | None:
 
     1. **Auto-approve.** A job run is unattended — there's no human to answer an
        ApprovalCard — so a native harness in its default (prompt-on-action) mode
-       would stall on the first Edit/Write/Bash. Force full bypass per harness,
-       matching the headless seam polly's native workers use:
+       would stall on the first Edit/Write/Bash. Pick the non-prompting mode each
+       native harness exposes:
 
-       - ``claude-native`` → ``--permission-mode bypassPermissions``
+       - ``claude-native`` → ``--permission-mode auto``
        - ``codex-native``  → ``--dangerously-bypass-approvals-and-sandbox``
 
     2. **Execution-engine system prompt.** The flow-execution framing
@@ -298,9 +298,9 @@ def _native_launch_args(harness: str | None) -> list[str] | None:
        run without showing up as a user-visible message. (Only wired for
        ``claude-native``; the codex CLI's system-prompt seam differs.)
 
-    SDK harnesses (e.g. ``claude-sdk``) already default to ``bypassPermissions``
-    at spawn, so they need nothing here. Returns ``None`` for any non-native /
-    unknown harness (no terminal args set).
+    SDK harnesses (e.g. ``claude-sdk``) do not launch a native terminal here;
+    their approval mode is handled by the harness itself. Returns ``None`` for
+    any non-native / unknown harness (no terminal args set).
 
     :param harness: The run agent's canonical harness, or ``None``.
     :returns: A flat CLI-arg list, or ``None`` when nothing should be set.
@@ -309,7 +309,7 @@ def _native_launch_args(harness: str | None) -> list[str] | None:
     if canonical == CLAUDE_NATIVE_CODING_AGENT.harness:
         return [
             "--permission-mode",
-            "bypassPermissions",
+            "auto",
             "--append-system-prompt",
             _EXECUTION_SYSTEM_PROMPT,
         ]
@@ -385,8 +385,8 @@ async def _execute_job_run(
             host_id = None
 
     # Auto-approve mode: a job run is unattended, so no human can answer an
-    # approval prompt. Force full bypass for native harnesses (SDK harnesses
-    # already default to bypass). Harness = the job's override, else the spec's.
+    # approval prompt. Set native terminal launch args to a non-prompting mode.
+    # Harness = the job's override, else the spec's.
     harness = job.harness_override
     if harness is None and agent_cache is not None:
         try:
@@ -402,7 +402,7 @@ async def _execute_job_run(
         except Exception:  # noqa: BLE001 - spec load is best-effort for approval mode
             _logger.warning("job-run harness resolve failed for agent %s", agent_id, exc_info=True)
             harness = None
-    terminal_launch_args = _native_launch_args(harness)
+    terminal_launch_args = _auto_approve_launch_args(harness)
 
     # Create the session WITHOUT initial items — we dispatch the narrative as a
     # real event below so it executes.
@@ -466,7 +466,7 @@ async def _execute_job_run(
     # Dispatch the narrative. With a connected runner this persists + forwards
     # the message and starts a turn; otherwise fall back to a history seed.
     # The execution-engine framing is injected at the harness level via
-    # ``--append-system-prompt`` (see ``_native_launch_args``), so it
+    # ``--append-system-prompt`` (see ``_auto_approve_launch_args``), so it
     # steers the agent without appearing as a user-visible message.
     narrative_event = SessionEventInput(
         type="message",
